@@ -9,7 +9,7 @@
 
 namespace atlas {
 
-void run_single_connection_server(int port) {
+void run_single_connection_server(const App& app, int port) {
     // 1. Resolve localhost address using getaddrinfo()
     struct addrinfo hints{};
     hints.ai_family = AF_INET;        // IPv4
@@ -44,7 +44,7 @@ void run_single_connection_server(int port) {
         raw_listen_fd = -1;
     }
 
-    // Always free the addrinfo structure allocated by getaddrinfo()
+    // Free the addrinfo structure allocated by getaddrinfo()
     ::freeaddrinfo(res);
 
     if (raw_listen_fd < 0) {
@@ -61,7 +61,7 @@ void run_single_connection_server(int port) {
         return;
     }
 
-    std::cout << "Atlas TCP server listening on 127.0.0.1:" << port << " (waiting for 1 client)...\n";
+    std::cout << "Atlas HTTP server listening on http://127.0.0.1:" << port << " (waiting for 1 client)...\n";
 
     // 3. Call accept() for one client
     sockaddr_storage client_addr{};
@@ -76,17 +76,16 @@ void run_single_connection_server(int port) {
     Socket client_socket(raw_client_fd);
     std::cout << "Client successfully connected!\n";
 
-    // 4. Repeatedly recv() and append received bytes until EOF or error
-    std::string received_data;
+    // 4. Repeatedly recv() and stream bytes directly into the table-driven HttpParser
+    HttpParser parser;
     char buffer[1024];
 
-    while (true) {
+    while (!parser.is_complete() && !parser.has_error()) {
         ssize_t bytes_received = ::recv(client_socket.get(), buffer, sizeof(buffer), 0);
         if (bytes_received > 0) {
-            received_data.append(buffer, static_cast<size_t>(bytes_received));
+            parser.feed(buffer, static_cast<size_t>(bytes_received));
         } else if (bytes_received == 0) {
-            // recv() returning 0 indicates client has closed their write half (orderly EOF)
-            std::cout << "Client finished sending (received EOF).\n";
+            // Client closed connection (orderly EOF)
             break;
         } else {
             if (errno == EINTR) {
@@ -97,11 +96,23 @@ void run_single_connection_server(int port) {
         }
     }
 
-    std::cout << "--- Received Data from Client (" << received_data.size() << " bytes) ---\n"
-              << received_data << "\n";
+    // 5. Produce Request and dispatch to App
+    auto req = parser.get_request();
+    Response response;
 
-    // 5. Repeatedly send() until the entire response is sent or an error occurs
-    const std::string response_data = "Hello from Atlas TCP server!\n";
+    if (req.has_value()) {
+        std::cout << "Dispatched to route: " << req->method() << " " << req->path() << "\n";
+        // 6. Let App handle the Request and produce a Response
+        response = app.handle(*req);
+    } else {
+        std::cerr << "Parser reported error or incomplete request! Returning 400 Bad Request.\n";
+        response = Response(400, "Bad Request");
+    }
+
+    // 7. Serialize the Response into standard HTTP/1.1 wire format
+    std::string response_data = serialize_response(response);
+
+    // 8. Repeatedly send() until the entire HTTP response is sent or an error occurs
     size_t total_sent = 0;
     bool send_failed = false;
 
@@ -122,13 +133,19 @@ void run_single_connection_server(int port) {
     }
 
     if (!send_failed) {
-        std::cout << "--- Sent Response to Client (" << total_sent << " bytes) ---\n"
+        std::cout << "--- Sent HTTP Response (" << total_sent << " bytes) ---\n"
                   << response_data;
     }
 
     std::cout << "Closing client connection and stopping server.\n";
 
     // client_socket and listen_socket are automatically closed by RAII upon function exit
+}
+
+void run_single_connection_server(int port) {
+    App default_app;
+    default_app["/"] = "Hello from Atlas!";
+    run_single_connection_server(default_app, port);
 }
 
 } // namespace atlas

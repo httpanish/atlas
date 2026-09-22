@@ -7,6 +7,8 @@ std::string serialize_response(const Response& response) {
     std::string reason = "OK";
     if (response.status_code() == 404) {
         reason = "Not Found";
+    } else if (response.status_code() == 400) {
+        reason = "Bad Request";
     }
 
     std::string raw;

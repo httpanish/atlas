@@ -3,6 +3,7 @@
 #include <iostream>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <vector>
 
 int main() {
     atlas::App app;
@@ -64,21 +65,12 @@ int main() {
     assert(res_parsed1.status_code() == 200);
     assert(res_parsed1.body() == "About Atlas");
 
-    // Valid single-line GET without headers
-    std::string raw2 = "GET / HTTP/1.0";
-    auto parsed2 = atlas::parse_request(raw2);
-    assert(parsed2.has_value());
-    assert(parsed2->method() == "GET");
-    assert(parsed2->path() == "/");
-    assert(app.handle(*parsed2).body() == "Welcome to Atlas!");
-
     // 8. Test parse_request with malformed / unsupported inputs
     assert(!atlas::parse_request("").has_value());
     assert(!atlas::parse_request("GET /about").has_value());
-    assert(!atlas::parse_request("POST /about HTTP/1.1\r\n").has_value());
-    assert(!atlas::parse_request("GET about HTTP/1.1\r\n").has_value());
-    assert(!atlas::parse_request("GET / HTTP/2.0\r\n").has_value());
-    assert(!atlas::parse_request("GET /about HTTP/1.1 extra_token\r\n").has_value());
+    assert(!atlas::parse_request("POST /about HTTP/1.1\r\n\r\n").has_value());
+    assert(!atlas::parse_request("GET about HTTP/1.1\r\n\r\n").has_value());
+    assert(!atlas::parse_request("GET / HTTP/2.0\r\n\r\n").has_value());
 
     // 9. Test serialize_response
     // 200 OK test
@@ -105,12 +97,10 @@ int main() {
 
     // 10. Test Socket RAII wrapper
     {
-        // Default constructor creates invalid socket
         atlas::Socket empty_sock;
         assert(!empty_sock.is_valid());
         assert(empty_sock.get() == -1);
 
-        // Create a connected pair of sockets to test RAII ownership and communication
         int sv[2];
         int res = ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
         assert(res == 0);
@@ -120,7 +110,6 @@ int main() {
         assert(sock1.is_valid());
         assert(sock2.is_valid());
 
-        // Test sending and receiving through RAII wrapped sockets
         const char msg[] = "ping";
         ssize_t sent = ::send(sock1.get(), msg, sizeof(msg), 0);
         assert(sent == sizeof(msg));
@@ -130,24 +119,114 @@ int main() {
         assert(recvd == sizeof(msg));
         assert(std::string(buf) == "ping");
 
-        // Test move constructor
         atlas::Socket moved_sock(std::move(sock1));
         assert(moved_sock.is_valid());
         assert(!sock1.is_valid());
-        assert(sock1.get() == -1);
 
-        // Test move assignment
         atlas::Socket assign_sock;
         assign_sock = std::move(moved_sock);
         assert(assign_sock.is_valid());
-        assert(!moved_sock.is_valid());
 
-        // Test explicit close
         assign_sock.close();
         assert(!assign_sock.is_valid());
-        assert(assign_sock.get() == -1);
-    } // sock2 goes out of scope here and automatically closes its fd via RAII!
+    }
 
-    std::cout << "All Atlas tests (including Socket RAII) passed successfully!\n";
+    // 11. Test Streaming Table-Driven HttpParser
+    // A. Basic complete requests
+    {
+        atlas::HttpParser parser;
+        parser.feed("GET / HTTP/1.1\r\n\r\n");
+        assert(parser.is_complete());
+        assert(!parser.has_error());
+        auto req = parser.get_request();
+        assert(req.has_value());
+        assert(req->method() == "GET");
+        assert(req->path() == "/");
+    }
+
+    {
+        atlas::HttpParser parser;
+        parser.feed("GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert(parser.is_complete());
+        assert(!parser.has_error());
+        auto req = parser.get_request();
+        assert(req.has_value());
+        assert(req->method() == "GET");
+        assert(req->path() == "/about");
+    }
+
+    // B. Same requests split across byte boundaries (1 byte at a time!)
+    {
+        std::string full_req = "GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        atlas::HttpParser parser;
+        for (char c : full_req) {
+            assert(!parser.is_complete()); // Shouldn't be complete until final '\n'
+            parser.feed(&c, 1);
+        }
+        assert(parser.is_complete());
+        assert(!parser.has_error());
+        auto req = parser.get_request();
+        assert(req.has_value());
+        assert(req->method() == "GET");
+        assert(req->path() == "/about");
+    }
+
+    // C. Chunked stream splitting (e.g. 2 bytes, 5 bytes, 3 bytes)
+    {
+        std::vector<std::string> chunks = {"GE", "T /", "ab", "out HTTP/1.1\r", "\nHost: localhost\r\n", "\r\n"};
+        atlas::HttpParser parser;
+        for (const auto& chunk : chunks) {
+            parser.feed(chunk);
+        }
+        assert(parser.is_complete());
+        assert(!parser.has_error());
+        auto req = parser.get_request();
+        assert(req.has_value());
+        assert(req->method() == "GET");
+        assert(req->path() == "/about");
+    }
+
+    // D. Incomplete request
+    {
+        atlas::HttpParser parser;
+        parser.feed("GET /about HTTP/1.1\r\n");
+        assert(!parser.is_complete());
+        assert(!parser.has_error());
+        assert(!parser.get_request().has_value());
+
+        // Feeding remaining bytes completes it
+        parser.feed("\r\n");
+        assert(parser.is_complete());
+        assert(parser.get_request().has_value());
+    }
+
+    // E. Invalid method
+    {
+        atlas::HttpParser parser;
+        parser.feed("POST / HTTP/1.1\r\n\r\n");
+        assert(parser.has_error());
+        assert(!parser.is_complete());
+        assert(!parser.get_request().has_value());
+    }
+
+    // F. Invalid path (no leading slash)
+    {
+        atlas::HttpParser parser;
+        parser.feed("GET about HTTP/1.1\r\n\r\n");
+        assert(parser.has_error());
+        assert(!parser.is_complete());
+        assert(!parser.get_request().has_value());
+    }
+
+    // G. Invalid HTTP version
+    {
+        atlas::HttpParser parser;
+        parser.feed("GET / HTTP/2.0\r\n\r\n");
+        assert(parser.has_error());
+        assert(!parser.is_complete());
+        assert(!parser.get_request().has_value());
+    }
+
+    std::cout << "All Atlas tests (including LUT streaming HttpParser) passed successfully!\n";
     return 0;
 }

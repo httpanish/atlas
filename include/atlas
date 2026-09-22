@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <cstddef>
 #include <optional>
@@ -64,8 +65,49 @@ private:
     std::unordered_map<std::string, std::string> routes_;
 };
 
-// Parses a raw HTTP request string into a Request object.
-// Returns std::nullopt if the request is malformed or unsupported.
+// Streaming table-driven HTTP parser
+class HttpParser {
+public:
+    enum State {
+        STATE_METHOD = 0,
+        STATE_PATH = 1,
+        STATE_VERSION = 2,
+        STATE_REQ_LINE_CR = 3,
+        STATE_HEADER_START = 4,
+        STATE_HEADER_LINE = 5,
+        STATE_HEADER_LINE_CR = 6,
+        STATE_EMPTY_LINE_CR = 7,
+        STATE_COMPLETE = 8,
+        STATE_ERROR = 9
+    };
+
+    HttpParser() = default;
+
+    // Feed a chunk of bytes to the parser. Returns false if an error occurred.
+    bool feed(const char* data, std::size_t size);
+    bool feed(std::string_view chunk);
+
+    // State queries
+    bool is_complete() const;
+    bool has_error() const;
+    State state() const;
+
+    // Produces the Request once parsing is complete.
+    std::optional<Request> get_request() const;
+
+    // Reset back to initial state
+    void reset();
+
+private:
+    void consume_char(char c);
+
+    State state_ = STATE_METHOD;
+    std::string method_;
+    std::string path_;
+    std::string version_;
+};
+
+// Convenience helper to parse a full string in one go.
 std::optional<Request> parse_request(const std::string& raw);
 
 // Serializes a Response object into a raw HTTP/1.1 response string.
@@ -95,8 +137,11 @@ private:
     int fd_ = -1;
 };
 
-// Runs a minimal single-threaded TCP server that accepts ONE connection on port,
-// receives data, prints it, sends a response, and closes.
+// Runs a minimal single-threaded HTTP server that accepts ONE connection on port,
+// parses the request, dispatches it to the App, sends the HTTP response, and closes.
+void run_single_connection_server(const App& app, int port = 8080);
+
+// Convenience overload using a default empty App.
 void run_single_connection_server(int port = 8080);
 
 } // namespace atlas
