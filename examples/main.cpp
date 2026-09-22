@@ -13,22 +13,27 @@ int main() {
     std::cout << "Route '/about': " << app["/about"] << "\n";
     std::cout << "Total routes  : " << app.size() << "\n\n";
 
-    // Simulate incoming HTTP requests
-    std::cout << "--- Handling Requests ---\n";
-    atlas::Request req1("GET", "/");
-    atlas::Response res1 = app.handle(req1);
-    std::cout << req1.method() << " " << req1.path() << " -> Status: " 
-              << res1.status_code() << ", Body: \"" << res1.body() << "\"\n";
+    // Simulate raw HTTP request text arriving over the wire
+    std::string raw_http = 
+        "GET /about HTTP/1.1\r\n"
+        "Host: localhost:8080\r\n"
+        "User-Agent: curl/8.0\r\n"
+        "\r\n";
 
-    atlas::Request req2("GET", "/about");
-    atlas::Response res2 = app.handle(req2);
-    std::cout << req2.method() << " " << req2.path() << " -> Status: " 
-              << res2.status_code() << ", Body: \"" << res2.body() << "\"\n";
+    std::cout << "--- Parsing Raw HTTP Request ---\n";
+    std::cout << raw_http;
 
-    atlas::Request req3("GET", "/contact");
-    atlas::Response res3 = app.handle(req3);
-    std::cout << req3.method() << " " << req3.path() << " -> Status: " 
-              << res3.status_code() << ", Body: \"" << res3.body() << "\"\n";
+    auto req = atlas::parse_request(raw_http);
+    if (req.has_value()) {
+        std::cout << "Successfully parsed Request: "
+                  << req->method() << " " << req->path() << "\n";
+
+        atlas::Response res = app.handle(*req);
+        std::cout << "Response -> Status: " << res.status_code() 
+                  << ", Body: \"" << res.body() << "\"\n";
+    } else {
+        std::cout << "Failed to parse request!\n";
+    }
 
     return 0;
 }

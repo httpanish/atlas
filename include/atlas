@@ -3,6 +3,7 @@
 #include <string>
 #include <unordered_map>
 #include <cstddef>
+#include <optional>
 
 namespace atlas {
 
@@ -62,5 +63,9 @@ public:
 private:
     std::unordered_map<std::string, std::string> routes_;
 };
+
+// Parses a raw HTTP request string into a Request object.
+// Returns std::nullopt if the request is malformed or unsupported.
+std::optional<Request> parse_request(const std::string& raw);
 
 } // namespace atlas

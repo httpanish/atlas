@@ -14,6 +14,7 @@ endif()
 # Core Atlas library
 add_library(atlas
     src/app.cpp
+    src/parser.cpp
 )
 
 target_include_directories(atlas PUBLIC

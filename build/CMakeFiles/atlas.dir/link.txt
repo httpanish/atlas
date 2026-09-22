@@ -1,2 +1,0 @@
-/usr/bin/ar qc libatlas.a CMakeFiles/atlas.dir/src/app.cpp.o
-/usr/bin/ranlib libatlas.a

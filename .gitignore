@@ -1,0 +1,6 @@
+# Build directory and compiled binaries
+build/
+
+# Editor / IDE metadata
+.vscode/
+.idea/
