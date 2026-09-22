@@ -30,6 +30,26 @@ int main() {
     assert(const_app["/"] == "Welcome to Atlas!");
     assert(const_app.contains("/about"));
 
+    // 5. Test Request and Response handling
+    atlas::Request req_root("GET", "/");
+    assert(req_root.method() == "GET");
+    assert(req_root.path() == "/");
+
+    atlas::Response res_root = app.handle(req_root);
+    assert(res_root.status_code() == 200);
+    assert(res_root.body() == "Welcome to Atlas!");
+
+    atlas::Request req_about("GET", "/about");
+    atlas::Response res_about = app.handle(req_about);
+    assert(res_about.status_code() == 200);
+    assert(res_about.body() == "About Atlas");
+
+    // 6. Test 404 Not Found for unregistered routes
+    atlas::Request req_missing("GET", "/not-found");
+    atlas::Response res_missing = app.handle(req_missing);
+    assert(res_missing.status_code() == 404);
+    assert(res_missing.body() == "Not Found");
+
     std::cout << "All basic Atlas tests passed successfully!\n";
     return 0;
 }

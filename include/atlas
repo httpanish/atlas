@@ -6,6 +6,35 @@
 
 namespace atlas {
 
+class Request {
+public:
+    Request() = default;
+    Request(std::string method, std::string path, std::string body = "");
+
+    const std::string& method() const;
+    const std::string& path() const;
+    const std::string& body() const;
+
+private:
+    std::string method_ = "GET";
+    std::string path_ = "/";
+    std::string body_;
+};
+
+class Response {
+public:
+    Response() = default;
+    Response(std::string body);
+    Response(int status_code, std::string body);
+
+    int status_code() const;
+    const std::string& body() const;
+
+private:
+    int status_code_ = 200;
+    std::string body_;
+};
+
 class App {
 public:
     App() = default;
@@ -26,6 +55,9 @@ public:
 
     // Returns the number of registered routes.
     std::size_t size() const;
+
+    // Handles an incoming Request and produces a Response.
+    Response handle(const Request& req) const;
 
 private:
     std::unordered_map<std::string, std::string> routes_;
