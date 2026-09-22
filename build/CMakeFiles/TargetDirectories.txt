@@ -1,0 +1,6 @@
+/home/hal/Documents/projects/atlas/build/CMakeFiles/atlas.dir
+/home/hal/Documents/projects/atlas/build/CMakeFiles/atlas_example.dir
+/home/hal/Documents/projects/atlas/build/CMakeFiles/atlas_tests.dir
+/home/hal/Documents/projects/atlas/build/CMakeFiles/test.dir
+/home/hal/Documents/projects/atlas/build/CMakeFiles/edit_cache.dir
+/home/hal/Documents/projects/atlas/build/CMakeFiles/rebuild_cache.dir

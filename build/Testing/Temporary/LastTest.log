@@ -1,0 +1,19 @@
+Start testing: Sep 20 18:58 IST
+----------------------------------------------------------
+1/1 Testing: basic_tests
+1/1 Test: basic_tests
+Command: "/home/hal/Documents/projects/atlas/build/atlas_tests"
+Directory: /home/hal/Documents/projects/atlas/build
+"basic_tests" start time: Sep 20 18:58 IST
+Output:
+----------------------------------------------------------
+All basic Atlas tests passed successfully!
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"basic_tests" end time: Sep 20 18:58 IST
+"basic_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 20 18:58 IST

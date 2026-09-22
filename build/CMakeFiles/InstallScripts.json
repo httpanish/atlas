@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/hal/Documents/projects/atlas/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
