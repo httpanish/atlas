@@ -15,6 +15,9 @@ endif()
 add_library(atlas
     src/app.cpp
     src/parser.cpp
+    src/serializer.cpp
+    src/socket.cpp
+    src/server.cpp
 )
 
 target_include_directories(atlas PUBLIC
@@ -22,11 +25,17 @@ target_include_directories(atlas PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# Example executable
+# Example executable (HTTP pipeline demo)
 add_executable(atlas_example
     examples/main.cpp
 )
 target_link_libraries(atlas_example PRIVATE atlas)
+
+# Server executable (TCP networking demo)
+add_executable(atlas_server
+    examples/server_main.cpp
+)
+target_link_libraries(atlas_server PRIVATE atlas)
 
 # Test executable
 add_executable(atlas_tests

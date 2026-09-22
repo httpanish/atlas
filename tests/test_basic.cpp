@@ -1,6 +1,8 @@
 #include <atlas>
 #include <cassert>
 #include <iostream>
+#include <sys/socket.h>
+#include <unistd.h>
 
 int main() {
     atlas::App app;
@@ -71,24 +73,81 @@ int main() {
     assert(app.handle(*parsed2).body() == "Welcome to Atlas!");
 
     // 8. Test parse_request with malformed / unsupported inputs
-    // Empty string
     assert(!atlas::parse_request("").has_value());
-
-    // Incomplete request line (missing HTTP version)
     assert(!atlas::parse_request("GET /about").has_value());
-
-    // Unsupported method (POST is not supported yet)
     assert(!atlas::parse_request("POST /about HTTP/1.1\r\n").has_value());
-
-    // Invalid path without leading slash
     assert(!atlas::parse_request("GET about HTTP/1.1\r\n").has_value());
-
-    // Unsupported HTTP version
     assert(!atlas::parse_request("GET / HTTP/2.0\r\n").has_value());
-
-    // Extra tokens on the request line
     assert(!atlas::parse_request("GET /about HTTP/1.1 extra_token\r\n").has_value());
 
-    std::cout << "All Atlas tests (including parse_request) passed successfully!\n";
+    // 9. Test serialize_response
+    // 200 OK test
+    atlas::Response res_ok(200, "Hello");
+    std::string raw_ok = atlas::serialize_response(res_ok);
+    std::string expected_ok = 
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Length: 5\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "Hello";
+    assert(raw_ok == expected_ok);
+
+    // 404 Not Found test
+    atlas::Response res_404(404, "Not Found");
+    std::string raw_404 = atlas::serialize_response(res_404);
+    std::string expected_404 = 
+        "HTTP/1.1 404 Not Found\r\n"
+        "Content-Length: 9\r\n"
+        "Content-Type: text/plain\r\n"
+        "\r\n"
+        "Not Found";
+    assert(raw_404 == expected_404);
+
+    // 10. Test Socket RAII wrapper
+    {
+        // Default constructor creates invalid socket
+        atlas::Socket empty_sock;
+        assert(!empty_sock.is_valid());
+        assert(empty_sock.get() == -1);
+
+        // Create a connected pair of sockets to test RAII ownership and communication
+        int sv[2];
+        int res = ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+        assert(res == 0);
+
+        atlas::Socket sock1(sv[0]);
+        atlas::Socket sock2(sv[1]);
+        assert(sock1.is_valid());
+        assert(sock2.is_valid());
+
+        // Test sending and receiving through RAII wrapped sockets
+        const char msg[] = "ping";
+        ssize_t sent = ::send(sock1.get(), msg, sizeof(msg), 0);
+        assert(sent == sizeof(msg));
+
+        char buf[16] = {0};
+        ssize_t recvd = ::recv(sock2.get(), buf, sizeof(buf), 0);
+        assert(recvd == sizeof(msg));
+        assert(std::string(buf) == "ping");
+
+        // Test move constructor
+        atlas::Socket moved_sock(std::move(sock1));
+        assert(moved_sock.is_valid());
+        assert(!sock1.is_valid());
+        assert(sock1.get() == -1);
+
+        // Test move assignment
+        atlas::Socket assign_sock;
+        assign_sock = std::move(moved_sock);
+        assert(assign_sock.is_valid());
+        assert(!moved_sock.is_valid());
+
+        // Test explicit close
+        assign_sock.close();
+        assert(!assign_sock.is_valid());
+        assert(assign_sock.get() == -1);
+    } // sock2 goes out of scope here and automatically closes its fd via RAII!
+
+    std::cout << "All Atlas tests (including Socket RAII) passed successfully!\n";
     return 0;
 }

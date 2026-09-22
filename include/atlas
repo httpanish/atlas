@@ -68,4 +68,35 @@ private:
 // Returns std::nullopt if the request is malformed or unsupported.
 std::optional<Request> parse_request(const std::string& raw);
 
+// Serializes a Response object into a raw HTTP/1.1 response string.
+std::string serialize_response(const Response& response);
+
+// A simple RAII wrapper around a POSIX socket file descriptor.
+class Socket {
+public:
+    Socket() = default;
+    explicit Socket(int fd);
+    ~Socket();
+
+    // Sockets own unique file descriptors: prevent copying.
+    Socket(const Socket&) = delete;
+    Socket& operator=(const Socket&) = delete;
+
+    // Allow moving ownership of the file descriptor.
+    Socket(Socket&& other) noexcept;
+    Socket& operator=(Socket&& other) noexcept;
+
+    // Accessors and state
+    int get() const noexcept;
+    bool is_valid() const noexcept;
+    void close();
+
+private:
+    int fd_ = -1;
+};
+
+// Runs a minimal single-threaded TCP server that accepts ONE connection on port,
+// receives data, prints it, sends a response, and closes.
+void run_single_connection_server(int port = 8080);
+
 } // namespace atlas
