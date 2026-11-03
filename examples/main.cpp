@@ -1,4 +1,4 @@
-#include <atlas>
+#include <atlas/atlas.hpp>
 #include <iostream>
 
 int main() {

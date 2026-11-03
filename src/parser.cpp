@@ -1,4 +1,4 @@
-#include "atlas"
+#include "atlas/parser.hpp"
 
 #include <array>
 

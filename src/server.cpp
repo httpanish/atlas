@@ -1,4 +1,8 @@
-#include "atlas"
+#include "atlas/server.hpp"
+
+#include "atlas/parser.hpp"
+#include "atlas/serializer.hpp"
+#include "atlas/socket.hpp"
 
 #include <netdb.h>
 #include <sys/socket.h>

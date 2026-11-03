@@ -1,4 +1,4 @@
-#include <atlas>
+#include <atlas/atlas.hpp>
 
 #include <sys/socket.h>
 #include <unistd.h>

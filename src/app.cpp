@@ -1,4 +1,4 @@
-#include "atlas"
+#include "atlas/app.hpp"
 
 #include <stdexcept>
 
