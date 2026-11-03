@@ -1,31 +1,32 @@
 #include "atlas"
 
+#include <string_view>
+
 namespace atlas {
 
-std::string serialize_response(const Response& response) {
-    // 1. Determine the status reason phrase
-    std::string reason = "OK";
-    if (response.status_code() == 404) {
-        reason = "Not Found";
-    } else if (response.status_code() == 400) {
-        reason = "Bad Request";
+namespace {
+
+// Codes not listed here currently fall back to "OK" (see docs/routing-spec.md §5.3).
+std::string_view reason_phrase(int status_code) {
+    switch (status_code) {
+        case 400: return "Bad Request";
+        case 404: return "Not Found";
+        default:  return "OK";
     }
+}
+
+} // namespace
+
+std::string serialize_response(const Response& response) {
+    const std::string status = std::to_string(response.status_code());
+    const std::string length = std::to_string(response.body().size());
 
     std::string raw;
-
-    // 2. HTTP/1.1 status line
-    raw += "HTTP/1.1 " + std::to_string(response.status_code()) + " " + reason + "\r\n";
-
-    // 3. Response headers
-    raw += "Content-Length: " + std::to_string(response.body().size()) + "\r\n";
+    raw += "HTTP/1.1 " + status + " " + std::string(reason_phrase(response.status_code())) + "\r\n";
+    raw += "Content-Length: " + length + "\r\n";
     raw += "Content-Type: text/plain\r\n";
-
-    // 4. Blank line to separate headers from the body
-    raw += "\r\n";
-
-    // 5. Response body
+    raw += "\r\n";  // blank line ends the headers
     raw += response.body();
-
     return raw;
 }
 

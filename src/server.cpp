@@ -1,145 +1,149 @@
 #include "atlas"
-#include <sys/types.h>
-#include <sys/socket.h>
+
 #include <netdb.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <unistd.h>
-#include <iostream>
-#include <cstring>
+
 #include <cerrno>
+#include <cstring>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <string_view>
 
 namespace atlas {
 
-void run_single_connection_server(const App& app, int port) {
-    // 1. Resolve localhost address using getaddrinfo()
-    struct addrinfo hints{};
-    hints.ai_family = AF_INET;        // IPv4
-    hints.ai_socktype = SOCK_STREAM;  // TCP stream socket
-    hints.ai_flags = AI_PASSIVE;      // Suitable for bind()
+namespace {
 
-    struct addrinfo* res = nullptr;
-    std::string port_str = std::to_string(port);
-    int status = ::getaddrinfo("127.0.0.1", port_str.c_str(), &hints, &res);
-    if (status != 0) {
+// Creates a TCP socket bound to 127.0.0.1:port and starts listening on it.
+// Returns an invalid Socket (and logs why) on failure.
+Socket open_listening_socket(int port) {
+    addrinfo hints{};
+    hints.ai_family = AF_INET;        // IPv4
+    hints.ai_socktype = SOCK_STREAM;  // TCP
+
+    addrinfo* addresses = nullptr;
+    const std::string port_str = std::to_string(port);
+    if (int status = ::getaddrinfo("127.0.0.1", port_str.c_str(), &hints, &addresses); status != 0) {
         std::cerr << "getaddrinfo() failed: " << gai_strerror(status) << "\n";
-        return;
+        return {};
     }
 
-    // Loop through the results and bind to the first possible address
-    int raw_listen_fd = -1;
-    for (struct addrinfo* p = res; p != nullptr; p = p->ai_next) {
-        raw_listen_fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (raw_listen_fd < 0) {
+    // Bind to the first address that works.
+    Socket listener;
+    for (addrinfo* addr = addresses; addr != nullptr; addr = addr->ai_next) {
+        Socket candidate(::socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol));
+        if (!candidate.is_valid()) {
             continue;
         }
 
-        // Enable SO_REUSEADDR so port can be rebound immediately
-        int opt = 1;
-        ::setsockopt(raw_listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        // Lets the port be reused immediately after the server exits.
+        int enable = 1;
+        ::setsockopt(candidate.get(), SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
 
-        if (::bind(raw_listen_fd, p->ai_addr, p->ai_addrlen) == 0) {
-            break; // Successfully bound!
+        if (::bind(candidate.get(), addr->ai_addr, addr->ai_addrlen) == 0) {
+            listener = std::move(candidate);
+            break;
         }
-
-        ::close(raw_listen_fd);
-        raw_listen_fd = -1;
     }
+    ::freeaddrinfo(addresses);
 
-    // Free the addrinfo structure allocated by getaddrinfo()
-    ::freeaddrinfo(res);
-
-    if (raw_listen_fd < 0) {
+    if (!listener.is_valid()) {
         std::cerr << "Failed to bind to 127.0.0.1 on port " << port << "\n";
-        return;
+        return {};
     }
 
-    // Wrap the listening socket in our RAII wrapper
-    Socket listen_socket(raw_listen_fd);
-
-    // 2. Call listen() to wait for incoming connections
-    if (::listen(listen_socket.get(), 1) < 0) {
+    if (::listen(listener.get(), /*backlog=*/1) < 0) {
         std::cerr << "listen() failed: " << std::strerror(errno) << "\n";
-        return;
+        return {};
     }
 
-    std::cout << "Atlas HTTP server listening on http://127.0.0.1:" << port << " (waiting for 1 client)...\n";
+    return listener;
+}
 
-    // 3. Call accept() for one client
-    sockaddr_storage client_addr{};
-    socklen_t client_len = sizeof(client_addr);
-    int raw_client_fd = ::accept(listen_socket.get(), reinterpret_cast<sockaddr*>(&client_addr), &client_len);
-    if (raw_client_fd < 0) {
+// Blocks until a client connects. Returns an invalid Socket on failure.
+Socket accept_client(const Socket& listener) {
+    Socket client(::accept(listener.get(), nullptr, nullptr));
+    if (!client.is_valid()) {
         std::cerr << "accept() failed: " << std::strerror(errno) << "\n";
-        return;
     }
+    return client;
+}
 
-    // Wrap the client socket in our RAII wrapper
-    Socket client_socket(raw_client_fd);
-    std::cout << "Client successfully connected!\n";
-
-    // 4. Repeatedly recv() and stream bytes directly into the table-driven HttpParser
+// Streams bytes from the client into the parser until a full request has
+// arrived, the input is rejected, or the connection ends.
+std::optional<Request> read_request(const Socket& client) {
     HttpParser parser;
     char buffer[1024];
 
     while (!parser.is_complete() && !parser.has_error()) {
-        ssize_t bytes_received = ::recv(client_socket.get(), buffer, sizeof(buffer), 0);
-        if (bytes_received > 0) {
-            parser.feed(buffer, static_cast<size_t>(bytes_received));
-        } else if (bytes_received == 0) {
-            // Client closed connection (orderly EOF)
-            break;
-        } else {
-            if (errno == EINTR) {
-                continue; // Interrupted by signal, retry
-            }
+        ssize_t received = ::recv(client.get(), buffer, sizeof(buffer), 0);
+        if (received > 0) {
+            parser.feed(buffer, static_cast<std::size_t>(received));
+        } else if (received == 0) {
+            break;  // client closed the connection
+        } else if (errno != EINTR) {  // EINTR: interrupted by a signal, so retry
             std::cerr << "recv() failed: " << std::strerror(errno) << "\n";
             break;
         }
     }
 
-    // 5. Produce Request and dispatch to App
-    auto req = parser.get_request();
-    Response response;
+    return parser.get_request();
+}
 
-    if (req.has_value()) {
-        std::cout << "Dispatched to route: " << req->method() << " " << req->path() << "\n";
-        // 6. Let App handle the Request and produce a Response
-        response = app.handle(*req);
-    } else {
-        std::cerr << "Parser reported error or incomplete request! Returning 400 Bad Request.\n";
-        response = Response(400, "Bad Request");
-    }
-
-    // 7. Serialize the Response into standard HTTP/1.1 wire format
-    std::string response_data = serialize_response(response);
-
-    // 8. Repeatedly send() until the entire HTTP response is sent or an error occurs
-    size_t total_sent = 0;
-    bool send_failed = false;
-
-    while (total_sent < response_data.size()) {
-        ssize_t bytes_sent = ::send(client_socket.get(),
-                                    response_data.data() + total_sent,
-                                    response_data.size() - total_sent,
-                                    0);
-        if (bytes_sent < 0) {
+// send() may write only part of the buffer, so keep going until it's all sent.
+bool send_all(const Socket& client, std::string_view data) {
+    std::size_t total_sent = 0;
+    while (total_sent < data.size()) {
+        ssize_t sent = ::send(client.get(), data.data() + total_sent, data.size() - total_sent, 0);
+        if (sent < 0) {
             if (errno == EINTR) {
-                continue; // Interrupted by signal, retry
+                continue;
             }
             std::cerr << "send() failed: " << std::strerror(errno) << "\n";
-            send_failed = true;
-            break;
+            return false;
         }
-        total_sent += static_cast<size_t>(bytes_sent);
+        total_sent += static_cast<std::size_t>(sent);
     }
+    return true;
+}
 
-    if (!send_failed) {
-        std::cout << "--- Sent HTTP Response (" << total_sent << " bytes) ---\n"
-                  << response_data;
+Response respond(const App& app, const std::optional<Request>& req) {
+    if (!req) {
+        std::cerr << "Parser reported error or incomplete request! Returning 400 Bad Request.\n";
+        return Response(400, "Bad Request");
+    }
+    std::cout << "Dispatched to route: " << req->method() << " " << req->path() << "\n";
+    return app.handle(*req);
+}
+
+} // namespace
+
+void run_single_connection_server(const App& app, int port) {
+    Socket listener = open_listening_socket(port);
+    if (!listener.is_valid()) {
+        return;
+    }
+    std::cout << "Atlas HTTP server listening on http://127.0.0.1:" << port
+              << " (waiting for 1 client)...\n";
+
+    Socket client = accept_client(listener);
+    if (!client.is_valid()) {
+        return;
+    }
+    std::cout << "Client successfully connected!\n";
+
+    const Response response = respond(app, read_request(client));
+    const std::string raw_response = serialize_response(response);
+
+    if (send_all(client, raw_response)) {
+        std::cout << "--- Sent HTTP Response (" << raw_response.size() << " bytes) ---\n"
+                  << raw_response;
     }
 
     std::cout << "Closing client connection and stopping server.\n";
-
-    // client_socket and listen_socket are automatically closed by RAII upon function exit
+    // Both sockets are closed automatically when they go out of scope.
 }
 
 void run_single_connection_server(int port) {

@@ -1,21 +1,27 @@
 #pragma once
 
+#include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <cstddef>
-#include <optional>
+#include <utility>
 
 namespace atlas {
+
+// ============================================================================
+// HTTP messages
+// ============================================================================
 
 class Request {
 public:
     Request() = default;
-    Request(std::string method, std::string path, std::string body = "");
+    Request(std::string method, std::string path, std::string body = "")
+        : method_(std::move(method)), path_(std::move(path)), body_(std::move(body)) {}
 
-    const std::string& method() const;
-    const std::string& path() const;
-    const std::string& body() const;
+    const std::string& method() const { return method_; }
+    const std::string& path() const { return path_; }
+    const std::string& body() const { return body_; }
 
 private:
     std::string method_ = "GET";
@@ -26,48 +32,55 @@ private:
 class Response {
 public:
     Response() = default;
-    Response(std::string body);
-    Response(int status_code, std::string body);
+    Response(std::string body) : body_(std::move(body)) {}
+    Response(int status_code, std::string body)
+        : status_code_(status_code), body_(std::move(body)) {}
 
-    int status_code() const;
-    const std::string& body() const;
+    int status_code() const { return status_code_; }
+    const std::string& body() const { return body_; }
 
 private:
     int status_code_ = 200;
     std::string body_;
 };
 
+// ============================================================================
+// Routing: an App is a map of path -> response body
+// ============================================================================
+
 class App {
 public:
-    App() = default;
-
-    // Operator[] allows: app["/"] = "Hello World!";
-    // Returns a reference to the string in the map.
+    // Register or overwrite a route:  app["/"] = "Hello World!";
     std::string& operator[](const std::string& path);
 
-    // Const version for reading from a const App.
-    // Throws std::out_of_range if the path is not found.
+    // Read-only lookup. Throws std::out_of_range if the path is not registered.
     const std::string& operator[](const std::string& path) const;
 
-    // Check if a route exists.
     bool contains(const std::string& path) const;
 
-    // Retrieve the string value for a path (or empty string if missing).
+    // Returns the route's body, or an empty string if the path is not registered.
     std::string get(const std::string& path) const;
 
-    // Returns the number of registered routes.
     std::size_t size() const;
 
-    // Handles an incoming Request and produces a Response.
+    // Produces a 200 with the route's body, or a 404 if the path is not registered.
     Response handle(const Request& req) const;
 
 private:
     std::unordered_map<std::string, std::string> routes_;
 };
 
-// Streaming table-driven HTTP parser
+// ============================================================================
+// Parsing: a streaming, table-driven HTTP request parser
+// ============================================================================
+//
+// Bytes can be fed in chunks of any size (even one byte at a time). Each byte
+// is classified with a lookup table, and the next state comes from a
+// transition table. See src/parser.cpp for both tables.
+
 class HttpParser {
 public:
+    // The numeric values index rows of the transition table, so keep them in order.
     enum State {
         STATE_METHOD = 0,
         STATE_PATH = 1,
@@ -81,25 +94,24 @@ public:
         STATE_ERROR = 9
     };
 
-    HttpParser() = default;
-
-    // Feed a chunk of bytes to the parser. Returns false if an error occurred.
+    // Feeds a chunk of bytes. Returns false once the input has been rejected.
     bool feed(const char* data, std::size_t size);
     bool feed(std::string_view chunk);
 
-    // State queries
-    bool is_complete() const;
-    bool has_error() const;
-    State state() const;
+    bool is_complete() const { return state_ == STATE_COMPLETE; }
+    bool has_error() const { return state_ == STATE_ERROR; }
+    State state() const { return state_; }
 
-    // Produces the Request once parsing is complete.
+    // Returns the parsed Request, or std::nullopt until parsing is complete.
     std::optional<Request> get_request() const;
 
-    // Reset back to initial state
+    // Clears all state so the parser can be reused for another request.
     void reset();
 
 private:
     void consume_char(char c);
+    void append_to_token(char c);
+    bool finished_token_is_valid() const;
 
     State state_ = STATE_METHOD;
     std::string method_;
@@ -107,41 +119,47 @@ private:
     std::string version_;
 };
 
-// Convenience helper to parse a full string in one go.
+// Parses a complete request held in a single string.
 std::optional<Request> parse_request(const std::string& raw);
 
-// Serializes a Response object into a raw HTTP/1.1 response string.
+// ============================================================================
+// Serialization
+// ============================================================================
+
+// Converts a Response into HTTP/1.1 wire format.
 std::string serialize_response(const Response& response);
 
-// A simple RAII wrapper around a POSIX socket file descriptor.
+// ============================================================================
+// Networking
+// ============================================================================
+
+// Owns a POSIX socket file descriptor and closes it on destruction (RAII).
+// Move-only, because exactly one object may own a given descriptor.
 class Socket {
 public:
     Socket() = default;
-    explicit Socket(int fd);
-    ~Socket();
+    explicit Socket(int fd) : fd_(fd) {}
+    ~Socket() { close(); }
 
-    // Sockets own unique file descriptors: prevent copying.
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
 
-    // Allow moving ownership of the file descriptor.
     Socket(Socket&& other) noexcept;
     Socket& operator=(Socket&& other) noexcept;
 
-    // Accessors and state
-    int get() const noexcept;
-    bool is_valid() const noexcept;
+    int get() const noexcept { return fd_; }
+    bool is_valid() const noexcept { return fd_ >= 0; }
     void close();
 
 private:
     int fd_ = -1;
 };
 
-// Runs a minimal single-threaded HTTP server that accepts ONE connection on port,
-// parses the request, dispatches it to the App, sends the HTTP response, and closes.
+// Listens on 127.0.0.1:port, serves exactly ONE request with the given App,
+// then closes the connection and returns.
 void run_single_connection_server(const App& app, int port = 8080);
 
-// Convenience overload using a default empty App.
+// Same as above, using an App that only serves "/".
 void run_single_connection_server(int port = 8080);
 
 } // namespace atlas

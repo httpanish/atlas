@@ -1,116 +1,116 @@
 #include "atlas"
+
 #include <array>
 
 namespace atlas {
 
-// ============================================================================
-// 1. Character-Class Lookup Table (LUT)
-// ============================================================================
-enum CharClass {
-    CHAR_OTHER = 0,  // Regular characters (letters, digits, '/', '.', etc.)
-    CHAR_SPACE = 1,  // Space ' '
-    CHAR_CR    = 2,  // Carriage return '\r'
-    CHAR_LF    = 3   // Line feed '\n'
+namespace {
+
+using State = HttpParser::State;
+
+// ----------------------------------------------------------------------------
+// 1. Character classes: every byte maps to one of these columns.
+// ----------------------------------------------------------------------------
+enum CharClass : unsigned char {
+    CHAR_OTHER,  // letters, digits, '/', '.', ':', ...
+    CHAR_SPACE,  // ' '
+    CHAR_CR,     // '\r'
+    CHAR_LF,     // '\n'
 };
 
-// 256-entry lookup table mapping every possible byte (0..255) to a CharClass
-static const std::array<unsigned char, 256> char_classes = [] {
-    std::array<unsigned char, 256> table{};
+constexpr std::size_t kCharClassCount = CHAR_LF + 1;
+constexpr std::size_t kStateCount = HttpParser::STATE_ERROR + 1;
+
+constexpr auto kCharClasses = [] {
+    std::array<CharClass, 256> table{};
     table.fill(CHAR_OTHER);
-    table[static_cast<unsigned char>(' ')]  = CHAR_SPACE;
-    table[static_cast<unsigned char>('\r')] = CHAR_CR;
-    table[static_cast<unsigned char>('\n')] = CHAR_LF;
+    table[' '] = CHAR_SPACE;
+    table['\r'] = CHAR_CR;
+    table['\n'] = CHAR_LF;
     return table;
 }();
 
-// ============================================================================
-// 2. Finite State Machine Transitions (LUT)
-// ============================================================================
-// transitions[current_state][char_class] -> next_state
-static const int transitions[10][4] = {
-    //                               CHAR_OTHER                     CHAR_SPACE                     CHAR_CR                                CHAR_LF
-    /* 0: STATE_METHOD          */ { HttpParser::STATE_METHOD,      HttpParser::STATE_PATH,        HttpParser::STATE_ERROR,               HttpParser::STATE_ERROR },
-    /* 1: STATE_PATH            */ { HttpParser::STATE_PATH,        HttpParser::STATE_VERSION,     HttpParser::STATE_ERROR,               HttpParser::STATE_ERROR },
-    /* 2: STATE_VERSION         */ { HttpParser::STATE_VERSION,     HttpParser::STATE_ERROR,       HttpParser::STATE_REQ_LINE_CR,         HttpParser::STATE_HEADER_START },
-    /* 3: STATE_REQ_LINE_CR     */ { HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,               HttpParser::STATE_HEADER_START },
-    /* 4: STATE_HEADER_START    */ { HttpParser::STATE_HEADER_LINE, HttpParser::STATE_HEADER_LINE, HttpParser::STATE_EMPTY_LINE_CR,       HttpParser::STATE_COMPLETE },
-    /* 5: STATE_HEADER_LINE     */ { HttpParser::STATE_HEADER_LINE, HttpParser::STATE_HEADER_LINE, HttpParser::STATE_HEADER_LINE_CR,      HttpParser::STATE_HEADER_START },
-    /* 6: STATE_HEADER_LINE_CR  */ { HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,               HttpParser::STATE_HEADER_START },
-    /* 7: STATE_EMPTY_LINE_CR   */ { HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,               HttpParser::STATE_COMPLETE },
-    /* 8: STATE_COMPLETE        */ { HttpParser::STATE_COMPLETE,    HttpParser::STATE_COMPLETE,    HttpParser::STATE_COMPLETE,            HttpParser::STATE_COMPLETE },
-    /* 9: STATE_ERROR           */ { HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,       HttpParser::STATE_ERROR,               HttpParser::STATE_ERROR }
-};
+// ----------------------------------------------------------------------------
+// 2. Transitions: kTransitions[current_state][char_class] -> next_state
+// ----------------------------------------------------------------------------
+using TransitionTable = std::array<std::array<State, kCharClassCount>, kStateCount>;
 
-// ============================================================================
-// 3. Streaming HttpParser Implementation
-// ============================================================================
+constexpr TransitionTable kTransitions = [] {
+    using enum HttpParser::State;
+    return TransitionTable{{
+        //                            OTHER               SPACE               CR                    LF
+        /* STATE_METHOD         */ {{ STATE_METHOD,      STATE_PATH,         STATE_ERROR,          STATE_ERROR        }},
+        /* STATE_PATH           */ {{ STATE_PATH,        STATE_VERSION,      STATE_ERROR,          STATE_ERROR        }},
+        /* STATE_VERSION        */ {{ STATE_VERSION,     STATE_ERROR,        STATE_REQ_LINE_CR,    STATE_HEADER_START }},
+        /* STATE_REQ_LINE_CR    */ {{ STATE_ERROR,       STATE_ERROR,        STATE_ERROR,          STATE_HEADER_START }},
+        /* STATE_HEADER_START   */ {{ STATE_HEADER_LINE, STATE_HEADER_LINE,  STATE_EMPTY_LINE_CR,  STATE_COMPLETE     }},
+        /* STATE_HEADER_LINE    */ {{ STATE_HEADER_LINE, STATE_HEADER_LINE,  STATE_HEADER_LINE_CR, STATE_HEADER_START }},
+        /* STATE_HEADER_LINE_CR */ {{ STATE_ERROR,       STATE_ERROR,        STATE_ERROR,          STATE_HEADER_START }},
+        /* STATE_EMPTY_LINE_CR  */ {{ STATE_ERROR,       STATE_ERROR,        STATE_ERROR,          STATE_COMPLETE     }},
+        /* STATE_COMPLETE       */ {{ STATE_COMPLETE,    STATE_COMPLETE,     STATE_COMPLETE,       STATE_COMPLETE     }},
+        /* STATE_ERROR          */ {{ STATE_ERROR,       STATE_ERROR,        STATE_ERROR,          STATE_ERROR        }},
+    }};
+}();
+
+} // namespace
+
+// ----------------------------------------------------------------------------
+// 3. Parser
+// ----------------------------------------------------------------------------
 
 void HttpParser::consume_char(char c) {
-    if (state_ == STATE_COMPLETE || state_ == STATE_ERROR) {
+    if (is_complete() || has_error()) {
         return;
     }
 
-    // Step 1: Character classification via 256-entry LUT
-    unsigned char char_class = char_classes[static_cast<unsigned char>(c)];
+    const CharClass char_class = kCharClasses[static_cast<unsigned char>(c)];
+    State next = kTransitions[state_][char_class];
 
-    // Step 2: State transition via 2D Transition LUT
-    int next_state = transitions[state_][char_class];
-
-    // Step 3: Accumulate tokens during valid states
-    if (state_ == STATE_METHOD && char_class == CHAR_OTHER) {
-        method_ += c;
-    } else if (state_ == STATE_PATH && char_class == CHAR_OTHER) {
-        path_ += c;
-    } else if (state_ == STATE_VERSION && char_class == CHAR_OTHER) {
-        version_ += c;
+    if (char_class == CHAR_OTHER) {
+        append_to_token(c);
     }
 
-    // Step 4: Semantic validation on state transitions
-    if (state_ == STATE_METHOD && next_state == STATE_PATH) {
-        if (method_ != "GET") {
-            next_state = STATE_ERROR;
-        }
-    } else if (state_ == STATE_PATH && next_state == STATE_VERSION) {
-        if (path_.empty() || path_.front() != '/') {
-            next_state = STATE_ERROR;
-        }
-    } else if (state_ == STATE_VERSION && (next_state == STATE_REQ_LINE_CR || next_state == STATE_HEADER_START)) {
-        if (version_ != "HTTP/1.1" && version_ != "HTTP/1.0") {
-            next_state = STATE_ERROR;
-        }
+    // Moving to a new state means the current token (method, path, version)
+    // is finished, so this is the moment to check that it is acceptable.
+    const bool leaving_state = next != state_ && next != STATE_ERROR;
+    if (leaving_state && !finished_token_is_valid()) {
+        next = STATE_ERROR;
     }
 
-    state_ = static_cast<State>(next_state);
+    state_ = next;
+}
+
+void HttpParser::append_to_token(char c) {
+    switch (state_) {
+        case STATE_METHOD:  method_ += c;  break;
+        case STATE_PATH:    path_ += c;    break;
+        case STATE_VERSION: version_ += c; break;
+        default: break;  // header bytes are not stored yet
+    }
+}
+
+bool HttpParser::finished_token_is_valid() const {
+    switch (state_) {
+        case STATE_METHOD:  return method_ == "GET";
+        case STATE_PATH:    return path_.starts_with('/');
+        case STATE_VERSION: return version_ == "HTTP/1.1" || version_ == "HTTP/1.0";
+        default:            return true;
+    }
 }
 
 bool HttpParser::feed(const char* data, std::size_t size) {
-    for (std::size_t i = 0; i < size; ++i) {
+    for (std::size_t i = 0; i < size && !has_error(); ++i) {
         consume_char(data[i]);
-        if (state_ == STATE_ERROR) {
-            return false;
-        }
     }
-    return true;
+    return !has_error();
 }
 
 bool HttpParser::feed(std::string_view chunk) {
     return feed(chunk.data(), chunk.size());
 }
 
-bool HttpParser::is_complete() const {
-    return state_ == STATE_COMPLETE;
-}
-
-bool HttpParser::has_error() const {
-    return state_ == STATE_ERROR;
-}
-
-HttpParser::State HttpParser::state() const {
-    return state_;
-}
-
 std::optional<Request> HttpParser::get_request() const {
-    if (state_ != STATE_COMPLETE) {
+    if (!is_complete()) {
         return std::nullopt;
     }
     return Request(method_, path_);
