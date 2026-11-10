@@ -65,8 +65,10 @@ public:
         struct sigaction ours{};
         ours.sa_handler = on_stop_signal;
         sigemptyset(&ours.sa_mask);
-        // No SA_RESTART flag: a poll() blocked when the signal arrives returns
-        // EINTR straight away, so run() checks the flag without waiting.
+        // No SA_RESTART flag: if the signal is handled on the thread blocked in
+        // poll(), that poll() returns EINTR straight away and run() checks the
+        // flag at once. With worker threads the OS may pick another thread
+        // instead; then run() sees the flag at its next 200 ms poll() timeout.
         ours.sa_flags = 0;
         ::sigaction(SIGINT, &ours, &previous_int_);
         ::sigaction(SIGTERM, &ours, &previous_term_);
@@ -272,6 +274,9 @@ Server::Server(const App& app, ServerOptions options)
 }
 
 void Server::run() {
+    // The first run() closes the listening socket when it shuts down (so new
+    // clients are refused), which leaves nothing to accept on. A closed
+    // listener therefore means run() has already been called.
     if (!listener_.is_valid()) {
         throw std::logic_error("Server::run() can only be called once");
     }
