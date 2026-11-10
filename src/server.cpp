@@ -1,6 +1,6 @@
 #include "atlas/server.hpp"
 
-#include "atlas/parser.hpp"
+#include "atlas/request_parser.hpp"
 #include "atlas/serializer.hpp"
 #include "atlas/socket.hpp"
 
@@ -75,25 +75,46 @@ Socket accept_client(const Socket& listener) {
     return client;
 }
 
+// What read_request() got from the client. Exactly one of three things:
+//   - request is set:       a full request arrived
+//   - error_status is set:  reply with this status and an empty body
+//   - neither is set:       nothing to answer (the client sent nothing, or
+//                           recv() failed), so close without replying
+struct ReadResult {
+    std::optional<Request> request;
+    int error_status = 0;
+};
+
 // Streams bytes from the client into the parser until a full request has
 // arrived, the input is rejected, or the connection ends.
-std::optional<Request> read_request(const Socket& client) {
-    HttpParser parser;
+ReadResult read_request(const Socket& client) {
+    RequestParser parser;
     char buffer[1024];
+    bool received_anything = false;
 
-    while (!parser.is_complete() && !parser.has_error()) {
+    while (parser.status() == RequestParser::Status::NeedMore) {
         ssize_t received = ::recv(client.get(), buffer, sizeof(buffer), 0);
-        if (received > 0) {
-            parser.feed(buffer, static_cast<std::size_t>(received));
-        } else if (received == 0) {
-            break;  // client closed the connection
-        } else if (errno != EINTR) {  // EINTR: interrupted by a signal, so retry
+        if (received < 0) {
+            if (errno == EINTR) {
+                continue;  // interrupted by a signal, so retry
+            }
             std::cerr << "recv() failed: " << std::strerror(errno) << "\n";
-            break;
+            return {};
         }
+        if (received == 0) {
+            // Client closed the connection. A half-sent request gets a 400;
+            // a connection that never sent anything is closed silently.
+            return received_anything ? ReadResult{std::nullopt, 400} : ReadResult{};
+        }
+        received_anything = true;
+        // Any bytes after a complete request are ignored: one request per connection.
+        parser.feed(std::string_view(buffer, static_cast<std::size_t>(received)));
     }
 
-    return parser.get_request();
+    if (parser.status() == RequestParser::Status::Error) {
+        return {std::nullopt, status_for(parser.error())};
+    }
+    return {parser.take_request(), 0};
 }
 
 // send() may write only part of the buffer, so keep going until it's all sent.
@@ -113,13 +134,9 @@ bool send_all(const Socket& client, std::string_view data) {
     return true;
 }
 
-Response respond(const App& app, const std::optional<Request>& req) {
-    if (!req) {
-        std::cerr << "Parser reported error or incomplete request! Returning 400 Bad Request.\n";
-        return Response(400, "Bad Request");
-    }
-    std::cout << "Dispatched to route: " << req->method() << " " << req->path() << "\n";
-    return app.handle(*req);
+Response respond(const App& app, const Request& req) {
+    std::cout << "Dispatched to route: " << req.method() << " " << req.path() << "\n";
+    return app.handle(req);
 }
 
 } // namespace
@@ -138,7 +155,19 @@ void run_single_connection_server(const App& app, int port) {
     }
     std::cout << "Client successfully connected!\n";
 
-    const Response response = respond(app, read_request(client));
+    const ReadResult result = read_request(client);
+    if (!result.request && result.error_status == 0) {
+        std::cout << "Client sent nothing. Closing without a response.\n";
+        return;
+    }
+
+    Response response;
+    if (result.request) {
+        response = respond(app, *result.request);
+    } else {
+        std::cerr << "Rejected request with status " << result.error_status << ".\n";
+        response = Response(result.error_status, "");
+    }
     const std::string raw_response = serialize_response(response);
 
     if (send_all(client, raw_response)) {

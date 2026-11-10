@@ -16,7 +16,6 @@ add_library(atlas
     src/app.cpp
     src/comment_pda.cpp
     src/request_parser.cpp
-    src/parser.cpp
     src/serializer.cpp
     src/socket.cpp
     src/server.cpp

@@ -6,7 +6,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
-#include <vector>
 
 // Unlike assert(), CHECK still runs when NDEBUG is defined (e.g. Release builds).
 #define CHECK(expr)                                                              \
@@ -19,24 +18,6 @@
     } while (0)
 
 namespace {
-
-// Checks that a parser finished successfully with the expected request line.
-void check_parsed(const atlas::HttpParser& parser, const std::string& method,
-                  const std::string& path) {
-    CHECK(parser.is_complete());
-    CHECK(!parser.has_error());
-    auto req = parser.get_request();
-    CHECK(req.has_value());
-    CHECK(req->method() == method);
-    CHECK(req->path() == path);
-}
-
-// Checks that a parser rejected its input.
-void check_rejected(const atlas::HttpParser& parser) {
-    CHECK(parser.has_error());
-    CHECK(!parser.is_complete());
-    CHECK(!parser.get_request().has_value());
-}
 
 // ----------------------------------------------------------------------------
 // App
@@ -106,32 +87,6 @@ void test_handle() {
 }
 
 // ----------------------------------------------------------------------------
-// parse_request
-// ----------------------------------------------------------------------------
-
-void test_parse_request_valid() {
-    atlas::App app;
-    app["/about"] = "About Atlas";
-
-    auto parsed = atlas::parse_request("GET /about HTTP/1.1\r\nHost: localhost:8080\r\n\r\n");
-    CHECK(parsed.has_value());
-    CHECK(parsed->method() == "GET");
-    CHECK(parsed->path() == "/about");
-
-    atlas::Response res = app.handle(*parsed);
-    CHECK(res.status_code() == 200);
-    CHECK(res.body() == "About Atlas");
-}
-
-void test_parse_request_invalid() {
-    CHECK(!atlas::parse_request("").has_value());
-    CHECK(!atlas::parse_request("GET /about").has_value());
-    CHECK(!atlas::parse_request("POST /about HTTP/1.1\r\n\r\n").has_value());
-    CHECK(!atlas::parse_request("GET about HTTP/1.1\r\n\r\n").has_value());
-    CHECK(!atlas::parse_request("GET / HTTP/2.0\r\n\r\n").has_value());
-}
-
-// ----------------------------------------------------------------------------
 // serialize_response
 // ----------------------------------------------------------------------------
 
@@ -187,67 +142,6 @@ void test_socket_raii() {
     CHECK(!assign_sock.is_valid());
 }
 
-// ----------------------------------------------------------------------------
-// HttpParser (streaming)
-// ----------------------------------------------------------------------------
-
-void test_parser_complete_requests() {
-    {
-        atlas::HttpParser parser;
-        parser.feed("GET / HTTP/1.1\r\n\r\n");
-        check_parsed(parser, "GET", "/");
-    }
-    {
-        atlas::HttpParser parser;
-        parser.feed("GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n");
-        check_parsed(parser, "GET", "/about");
-    }
-}
-
-void test_parser_one_byte_at_a_time() {
-    const std::string full_req = "GET /about HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    atlas::HttpParser parser;
-    for (char c : full_req) {
-        CHECK(!parser.is_complete());  // must not complete before the final '\n'
-        parser.feed(&c, 1);
-    }
-    check_parsed(parser, "GET", "/about");
-}
-
-void test_parser_uneven_chunks() {
-    const std::vector<std::string> chunks = {
-        "GE", "T /", "ab", "out HTTP/1.1\r", "\nHost: localhost\r\n", "\r\n"};
-    atlas::HttpParser parser;
-    for (const auto& chunk : chunks) {
-        parser.feed(chunk);
-    }
-    check_parsed(parser, "GET", "/about");
-}
-
-void test_parser_incomplete_request() {
-    atlas::HttpParser parser;
-    parser.feed("GET /about HTTP/1.1\r\n");
-    CHECK(!parser.is_complete());
-    CHECK(!parser.has_error());
-    CHECK(!parser.get_request().has_value());
-
-    parser.feed("\r\n");
-    CHECK(parser.is_complete());
-    CHECK(parser.get_request().has_value());
-}
-
-void test_parser_rejects_bad_input() {
-    for (const char* raw : {
-             "POST / HTTP/1.1\r\n\r\n",     // unsupported method
-             "GET about HTTP/1.1\r\n\r\n",  // path without leading '/'
-             "GET / HTTP/2.0\r\n\r\n",      // unsupported version
-         }) {
-        atlas::HttpParser parser;
-        parser.feed(raw);
-        check_rejected(parser);
-    }
-}
-
 } // namespace
 
 int main() {
@@ -256,15 +150,8 @@ int main() {
     test_get_helper();
     test_const_app_access();
     test_handle();
-    test_parse_request_valid();
-    test_parse_request_invalid();
     test_serialize_response();
     test_socket_raii();
-    test_parser_complete_requests();
-    test_parser_one_byte_at_a_time();
-    test_parser_uneven_chunks();
-    test_parser_incomplete_request();
-    test_parser_rejects_bad_input();
 
     std::cout << "All Atlas tests passed.\n";
     return 0;

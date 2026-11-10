@@ -13,27 +13,34 @@ int main() {
     std::cout << "Route '/about': " << app["/about"] << "\n";
     std::cout << "Total routes  : " << app.size() << "\n\n";
 
-    // 1. Simulate raw HTTP request arriving over the wire
-    std::string raw_request = 
+    // 1. Simulate a raw HTTP request arriving over the wire
+    const std::string raw_request =
         "GET /about HTTP/1.1\r\n"
         "Host: localhost:8080\r\n"
-        "User-Agent: curl/8.0\r\n"
+        "User-Agent: curl/8.0 (x86_64; Linux)\r\n"
         "\r\n";
-
     std::cout << "--- 1. Incoming Raw Request ---\n" << raw_request;
 
-    // 2. Parse raw text into Request
-    auto req = atlas::parse_request(raw_request);
-    if (!req.has_value()) {
-        std::cerr << "Failed to parse request!\n";
+    // 2. Parse the raw bytes into a Request
+    atlas::RequestParser parser;
+    parser.feed(raw_request);
+    if (parser.status() != atlas::RequestParser::Status::Complete) {
+        std::cerr << "Failed to parse request! (status "
+                  << atlas::status_for(parser.error()) << ")\n";
         return 1;
     }
-
+    atlas::Request req = parser.take_request();
     std::cout << "--- 2. Parsed Request Object ---\n";
-    std::cout << "Method: " << req->method() << ", Path: " << req->path() << "\n\n";
+    std::cout << "Method: " << req.method() << ", Path: " << req.path()
+              << ", Version: " << req.version() << "\n";
+    // commented() returns nullptr when the header is absent, so check first.
+    if (const atlas::CommentedValue* ua = req.commented("user-agent"); ua && !ua->comments.empty()) {
+        std::cout << "User-Agent comment: " << ua->comments.front() << "\n";
+    }
+    std::cout << "\n";
 
     // 3. Dispatch to App to produce Response
-    atlas::Response res = app.handle(*req);
+    atlas::Response res = app.handle(req);
     std::cout << "--- 3. Produced Response Object ---\n";
     std::cout << "Status: " << res.status_code() << ", Body: \"" << res.body() << "\"\n\n";
 
