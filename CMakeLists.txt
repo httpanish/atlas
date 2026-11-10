@@ -14,6 +14,7 @@ endif()
 # Core Atlas library
 add_library(atlas
     src/app.cpp
+    src/comment_pda.cpp
     src/parser.cpp
     src/serializer.cpp
     src/socket.cpp
