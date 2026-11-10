@@ -95,6 +95,7 @@ void test_serialize_response() {
           "HTTP/1.1 200 OK\r\n"
           "Content-Length: 5\r\n"
           "Content-Type: text/plain\r\n"
+          "Connection: close\r\n"
           "\r\n"
           "Hello");
 
@@ -102,8 +103,28 @@ void test_serialize_response() {
           "HTTP/1.1 404 Not Found\r\n"
           "Content-Length: 9\r\n"
           "Content-Type: text/plain\r\n"
+          "Connection: close\r\n"
           "\r\n"
           "Not Found");
+}
+
+// The first line of a serialized response, without its "\r\n".
+std::string status_line(int status_code) {
+    const std::string raw = atlas::serialize_response(atlas::Response(status_code, ""));
+    return raw.substr(0, raw.find("\r\n"));
+}
+
+void test_reason_phrases() {
+    CHECK(status_line(200) == "HTTP/1.1 200 OK");
+    CHECK(status_line(201) == "HTTP/1.1 201 Created");
+    CHECK(status_line(204) == "HTTP/1.1 204 No Content");
+    CHECK(status_line(405) == "HTTP/1.1 405 Method Not Allowed");
+    CHECK(status_line(408) == "HTTP/1.1 408 Request Timeout");
+    CHECK(status_line(418) == "HTTP/1.1 418 I'm a teapot");
+    CHECK(status_line(500) == "HTTP/1.1 500 Internal Server Error");
+    CHECK(status_line(503) == "HTTP/1.1 503 Service Unavailable");
+    // Unknown codes get an empty reason phrase, which HTTP/1.1 allows.
+    CHECK(status_line(299) == "HTTP/1.1 299 ");
 }
 
 // ----------------------------------------------------------------------------
@@ -151,6 +172,7 @@ int main() {
     test_const_app_access();
     test_handle();
     test_serialize_response();
+    test_reason_phrases();
     test_socket_raii();
 
     std::cout << "All Atlas tests passed.\n";
