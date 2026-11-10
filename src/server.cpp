@@ -16,8 +16,10 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -229,20 +231,6 @@ void set_read_timeout(const Socket& client, std::chrono::milliseconds timeout) {
     ::setsockopt(client.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
-// Reads one request from the client, answers it, and returns.
-// The caller closes the socket afterwards.
-void handle_connection(const App& app, const Socket& client, std::chrono::milliseconds read_timeout) {
-    set_read_timeout(client, read_timeout);
-    const ReadResult result = read_request(client);
-    if (!result.request && result.error_status == 0) {
-        return;  // nothing to answer
-    }
-
-    const Response response = result.request ? app.handle(*result.request)
-                                             : Response(result.error_status, "");
-    send_all(client, serialize_response(response));
-}
-
 // Waits up to timeout_ms for a client to be ready to accept().
 // Returns false on timeout or if a signal interrupted the wait.
 bool wait_for_client(const Socket& listener, int timeout_ms) {
@@ -283,10 +271,44 @@ void Server::run() {
         }
         Socket client = accept_client(listener_);
         if (client.is_valid()) {
-            handle_connection(app_, client, options_.read_timeout);
+            handle_connection(client);
         }
         // client is closed here, when it goes out of scope.
     }
+}
+
+void Server::handle_connection(const Socket& client) {
+    const auto start = std::chrono::steady_clock::now();
+    set_read_timeout(client, options_.read_timeout);
+
+    const ReadResult result = read_request(client);
+    if (!result.request && result.error_status == 0) {
+        return;  // nothing to answer, and nothing worth logging
+    }
+
+    const Response response = result.request ? app_.handle(*result.request)
+                                             : Response(result.error_status, "");
+    if (send_all(client, serialize_response(response))) {
+        log_request(result.request, response.status_code(), start);
+    }
+}
+
+void Server::log_request(const std::optional<Request>& request, int status_code,
+                         std::chrono::steady_clock::time_point start) const {
+    if (!options_.log_requests) {
+        return;
+    }
+    const std::chrono::duration<double, std::milli> elapsed = std::chrono::steady_clock::now() - start;
+
+    // e.g. "GET /about 200 0.4ms", or "- - 400 0.1ms" when there's no parsed request.
+    std::ostringstream line;
+    if (request) {
+        line << request->method() << " " << request->path();
+    } else {
+        line << "- -";
+    }
+    line << " " << status_code << " " << std::fixed << std::setprecision(1) << elapsed.count() << "ms\n";
+    std::cout << line.str();
 }
 
 } // namespace atlas

@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <optional>
 #include <string>
 
 namespace atlas {
@@ -56,6 +57,13 @@ public:
     int port() const { return port_; }
 
 private:
+    // Reads one request from the client and answers it. The caller closes the socket.
+    void handle_connection(const Socket& client);
+
+    // Writes one line like "GET /about 200 0.4ms" to stdout, if log_requests is on.
+    void log_request(const std::optional<Request>& request, int status_code,
+                     std::chrono::steady_clock::time_point start) const;
+
     const App& app_;
     ServerOptions options_;
     Socket listener_;

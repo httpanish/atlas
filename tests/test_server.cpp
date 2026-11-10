@@ -12,6 +12,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <regex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -213,6 +215,49 @@ void test_stop_while_idle_returns_quickly() {
     CHECK(std::chrono::steady_clock::now() - stop_time < std::chrono::milliseconds(300));
 }
 
+// ----------------------------------------------------------------------------
+// Logging
+// ----------------------------------------------------------------------------
+
+// Sends std::cout into a string for as long as this object lives.
+class CaptureStdout {
+public:
+    CaptureStdout() : previous_(std::cout.rdbuf(captured_.rdbuf())) {}
+    ~CaptureStdout() { std::cout.rdbuf(previous_); }
+    std::string text() const { return captured_.str(); }
+
+private:
+    std::ostringstream captured_;
+    std::streambuf* previous_;
+};
+
+void test_logs_one_line_per_request() {
+    const atlas::App app = test_app();
+    atlas::ServerOptions options = test_options();
+    options.log_requests = true;
+
+    CaptureStdout capture;
+    {
+        RunningServer server(app, options);
+        exchange(server.port(), "GET /about HTTP/1.1\r\nHost: x\r\n\r\n");
+        exchange(server.port(), "GARBAGE\r\n\r\n");
+    }  // server stopped, so every log line has been written
+
+    // e.g. "GET /about 200 0.4ms\n- - 400 0.1ms\n"
+    const std::regex expected(R"(GET /about 200 \d+\.\dms\n- - 400 \d+\.\dms\n)");
+    CHECK(std::regex_match(capture.text(), expected));
+}
+
+void test_no_logs_when_disabled() {
+    const atlas::App app = test_app();
+    CaptureStdout capture;
+    {
+        RunningServer server(app, test_options());  // log_requests = false
+        exchange(server.port(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    }
+    CHECK(capture.text().empty());
+}
+
 // A stand-in for "the program's own handler", to check run() puts it back.
 void program_handler(int) {}
 
@@ -262,6 +307,8 @@ int main() {
     test_silent_client_gets_408();
     test_stop_while_idle_returns_quickly();
     test_signal_stops_run_and_restores_handler();
+    test_logs_one_line_per_request();
+    test_no_logs_when_disabled();
 
     std::cout << "All Atlas server tests passed.\n";
     return 0;
