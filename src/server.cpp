@@ -262,6 +262,11 @@ Server::Server(const App& app, ServerOptions options)
     if (options_.threads == 0 || options_.queue_size == 0) {
         throw std::invalid_argument("ServerOptions: threads and queue_size must be at least 1");
     }
+    // SO_RCVTIMEO treats a zero timeout as "wait forever", so 0 would quietly
+    // turn the read timeout off (see set_read_timeout).
+    if (options_.read_timeout <= std::chrono::milliseconds(0)) {
+        throw std::invalid_argument("ServerOptions: read_timeout must be greater than 0");
+    }
     listener_ = open_listening_socket(options_.host, options_.port);
     port_ = bound_port(listener_);
 }

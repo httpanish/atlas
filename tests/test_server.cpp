@@ -154,6 +154,23 @@ void test_zero_threads_or_queue_throws() {
     }
 }
 
+void test_non_positive_read_timeout_throws() {
+    // SO_RCVTIMEO treats 0 as "wait forever", which would let a silent client
+    // hold a worker forever and hang shutdown. So 0 and below are rejected.
+    atlas::App app;
+    for (int ms : {0, -1}) {
+        atlas::ServerOptions options = test_options();
+        options.read_timeout = std::chrono::milliseconds(ms);
+        bool threw = false;
+        try {
+            atlas::Server server(app, options);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Serving (milestone 1)
 // ----------------------------------------------------------------------------
@@ -428,6 +445,7 @@ int main() {
     test_port_zero_picks_a_port();
     test_port_in_use_throws();
     test_zero_threads_or_queue_throws();
+    test_non_positive_read_timeout_throws();
     test_serves_requests_one_after_another();
     test_malformed_request_gets_400();
     test_client_that_hangs_up_does_not_stop_the_server();

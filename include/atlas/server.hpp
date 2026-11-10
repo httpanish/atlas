@@ -26,7 +26,7 @@ struct ServerOptions {
     int port = 8080;                               // 0 = let the OS pick a free port
     std::size_t threads = 4;                       // worker threads
     std::size_t queue_size = 64;                   // max connections waiting for a worker
-    std::chrono::milliseconds read_timeout{5000};  // max silence from a client before 408
+    std::chrono::milliseconds read_timeout{5000};  // max silence from a client before 408 (must be > 0)
     bool log_requests = true;                      // one line per request on stdout
 };
 
@@ -41,7 +41,8 @@ class Server {
 public:
     // Binds and starts listening right away, so port() is valid immediately.
     // Throws std::system_error if the address can't be used, and
-    // std::invalid_argument if threads or queue_size is 0.
+    // std::invalid_argument if threads or queue_size is 0, or read_timeout
+    // isn't positive.
     explicit Server(const App& app, ServerOptions options = {});
 
     // Not copyable or movable: a Server owns its listening socket, and its
