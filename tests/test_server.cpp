@@ -245,6 +245,25 @@ void test_silent_client_does_not_block_others() {
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500));
 }
 
+void test_full_queue_gets_503() {
+    const atlas::App app = test_app();
+    atlas::ServerOptions options = test_options();
+    options.threads = 1;
+    options.queue_size = 1;
+    options.read_timeout = std::chrono::milliseconds(1000);
+    RunningServer server(app, options);
+
+    atlas::Socket busy = connect_to(server.port());     // taken by the only worker
+    let_server_accept();
+    atlas::Socket waiting = connect_to(server.port());  // fills the queue (size 1)
+    let_server_accept();
+
+    const auto start = std::chrono::steady_clock::now();
+    const std::string response = exchange(server.port(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    CHECK(response.starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500));  // turned away at once
+}
+
 // ----------------------------------------------------------------------------
 // Logging
 // ----------------------------------------------------------------------------
@@ -338,6 +357,7 @@ int main() {
     test_stop_while_idle_returns_quickly();
     test_signal_stops_run_and_restores_handler();
     test_silent_client_does_not_block_others();
+    test_full_queue_gets_503();
     test_logs_one_line_per_request();
     test_no_logs_when_disabled();
 

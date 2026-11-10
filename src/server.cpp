@@ -286,11 +286,21 @@ void Server::run() {
         if (!client.is_valid()) {
             continue;
         }
+        bool queued = false;
         {
             std::lock_guard lock(queue_mutex_);
-            queue_.push(std::move(client));
+            if (queue_.size() < options_.queue_size) {
+                queue_.push(std::move(client));
+                queued = true;
+            }
         }
-        queue_cv_.notify_one();  // wake one sleeping worker
+        if (queued) {
+            queue_cv_.notify_one();  // wake one sleeping worker
+        } else {
+            // Every worker is busy and the queue is full. Turning the client
+            // away keeps memory bounded however many clients pile up.
+            reject(client);
+        }
     }
 
     // Shutting down. Stop accepting: new clients are now refused by the OS.
@@ -341,6 +351,13 @@ void Server::handle_connection(const Socket& client) {
                                              : Response(result.error_status, "");
     if (send_all(client, serialize_response(response))) {
         log_request(result.request, response.status_code(), start);
+    }
+}
+
+void Server::reject(const Socket& client) {
+    const auto start = std::chrono::steady_clock::now();
+    if (send_all(client, serialize_response(Response(503, "")))) {
+        log_request(std::nullopt, 503, start);
     }
 }
 

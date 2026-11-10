@@ -67,6 +67,10 @@ private:
     // Reads one request from the client and answers it. The caller closes the socket.
     void handle_connection(const Socket& client);
 
+    // Answers 503 Service Unavailable without reading the request. Used when
+    // the queue is full, and for queued connections when shutting down.
+    void reject(const Socket& client);
+
     // Writes one line like "GET /about 200 0.4ms" to stdout, if log_requests is on.
     void log_request(const std::optional<Request>& request, int status_code,
                      std::chrono::steady_clock::time_point start) const;
