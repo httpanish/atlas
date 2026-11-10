@@ -5,6 +5,7 @@
 #include "atlas/socket.hpp"
 
 #include <netdb.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -13,32 +14,44 @@
 #include <cstring>
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace atlas {
 
 namespace {
 
-// Creates a TCP socket bound to 127.0.0.1:port and starts listening on it.
-// Returns an invalid Socket (and logs why) on failure.
-Socket open_listening_socket(int port) {
+// Throws a std::system_error built from errno, e.g. "bind 127.0.0.1:8080: Address already in use".
+[[noreturn]] void throw_errno(int error, const std::string& what) {
+    throw std::system_error(error, std::generic_category(), what);
+}
+
+// Creates a TCP socket bound to host:port and starts listening on it.
+// Throws std::system_error on failure.
+Socket open_listening_socket(const std::string& host, int port) {
+    const std::string where = host + ":" + std::to_string(port);
+
     addrinfo hints{};
     hints.ai_family = AF_INET;        // IPv4
     hints.ai_socktype = SOCK_STREAM;  // TCP
 
     addrinfo* addresses = nullptr;
     const std::string port_str = std::to_string(port);
-    if (int status = ::getaddrinfo("127.0.0.1", port_str.c_str(), &hints, &addresses); status != 0) {
-        std::cerr << "getaddrinfo() failed: " << gai_strerror(status) << "\n";
-        return {};
+    if (int status = ::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &addresses); status != 0) {
+        // getaddrinfo() has its own error codes instead of errno, so report EINVAL
+        // and put its message in the text.
+        throw_errno(EINVAL, "getaddrinfo " + where + " (" + gai_strerror(status) + ")");
     }
 
     // Bind to the first address that works.
     Socket listener;
+    int bind_error = 0;
     for (addrinfo* addr = addresses; addr != nullptr; addr = addr->ai_next) {
         Socket candidate(::socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol));
         if (!candidate.is_valid()) {
+            bind_error = errno;
             continue;
         }
 
@@ -50,20 +63,30 @@ Socket open_listening_socket(int port) {
             listener = std::move(candidate);
             break;
         }
+        bind_error = errno;
     }
     ::freeaddrinfo(addresses);
 
     if (!listener.is_valid()) {
-        std::cerr << "Failed to bind to 127.0.0.1 on port " << port << "\n";
-        return {};
+        throw_errno(bind_error, "bind " + where);
     }
 
-    if (::listen(listener.get(), /*backlog=*/1) < 0) {
-        std::cerr << "listen() failed: " << std::strerror(errno) << "\n";
-        return {};
+    // SOMAXCONN: let the kernel queue as many waiting clients as it allows.
+    if (::listen(listener.get(), SOMAXCONN) < 0) {
+        throw_errno(errno, "listen " + where);
     }
 
     return listener;
+}
+
+// Asks the OS which port a socket ended up on (matters when we asked for port 0).
+int bound_port(const Socket& socket) {
+    sockaddr_in address{};
+    socklen_t length = sizeof(address);
+    if (::getsockname(socket.get(), reinterpret_cast<sockaddr*>(&address), &length) < 0) {
+        throw_errno(errno, "getsockname");
+    }
+    return ntohs(address.sin_port);  // ntohs: network byte order -> host byte order
 }
 
 // Blocks until a client connects. Returns an invalid Socket on failure.
@@ -141,11 +164,17 @@ Response respond(const App& app, const Request& req) {
 
 } // namespace
 
-void run_single_connection_server(const App& app, int port) {
-    Socket listener = open_listening_socket(port);
-    if (!listener.is_valid()) {
-        return;
+Server::Server(const App& app, ServerOptions options)
+    : app_(app), options_(std::move(options)) {
+    if (options_.threads == 0 || options_.queue_size == 0) {
+        throw std::invalid_argument("ServerOptions: threads and queue_size must be at least 1");
     }
+    listener_ = open_listening_socket(options_.host, options_.port);
+    port_ = bound_port(listener_);
+}
+
+void run_single_connection_server(const App& app, int port) {
+    Socket listener = open_listening_socket("127.0.0.1", port);
     std::cout << "Atlas HTTP server listening on http://127.0.0.1:" << port
               << " (waiting for 1 client)...\n";
 

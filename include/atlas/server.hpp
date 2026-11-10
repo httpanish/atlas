@@ -1,8 +1,58 @@
 #pragma once
 
 #include "atlas/app.hpp"
+#include "atlas/socket.hpp"
+
+#include <chrono>
+#include <cstddef>
+#include <string>
 
 namespace atlas {
+
+// Settings for a Server. Fill in only what you need:
+//
+//   atlas::Server server(app, {.port = 3000, .threads = 8});
+//
+// This lives outside Server on purpose. A struct nested inside a class can't be
+// used as a default argument (`Options options = {}`) of that same class,
+// because its default values aren't known until the class is complete.
+struct ServerOptions {
+    std::string host = "127.0.0.1";
+    int port = 8080;                               // 0 = let the OS pick a free port
+    std::size_t threads = 4;                       // worker threads
+    std::size_t queue_size = 64;                   // max connections waiting for a worker
+    std::chrono::milliseconds read_timeout{5000};  // max silence from a client before 408
+    bool log_requests = true;                      // one line per request on stdout
+};
+
+// An HTTP server that serves an App until it is told to stop.
+//
+//   atlas::Server server(app);
+//   server.run();  // blocks until Ctrl+C, SIGTERM, or stop()
+//
+// The App is held by reference: it must outlive the Server, and must not be
+// changed while run() is executing.
+class Server {
+public:
+    // Binds and starts listening right away, so port() is valid immediately.
+    // Throws std::system_error if the address can't be used, and
+    // std::invalid_argument if threads or queue_size is 0.
+    explicit Server(const App& app, ServerOptions options = {});
+
+    // Not copyable or movable: a Server owns its listening socket, and its
+    // worker threads point back at it.
+    Server(const Server&) = delete;
+    Server& operator=(const Server&) = delete;
+
+    // The port actually bound (useful with port = 0).
+    int port() const { return port_; }
+
+private:
+    const App& app_;
+    ServerOptions options_;
+    Socket listener_;
+    int port_ = 0;
+};
 
 // Listens on 127.0.0.1:port, serves exactly ONE request with the given App,
 // then closes the connection and returns.

@@ -53,3 +53,10 @@ add_executable(atlas_parser_tests
 )
 target_link_libraries(atlas_parser_tests PRIVATE atlas)
 add_test(NAME parser_tests COMMAND atlas_parser_tests)
+
+# Server test executable (talks to a real Server over loopback sockets)
+add_executable(atlas_server_tests
+    tests/test_server.cpp
+)
+target_link_libraries(atlas_server_tests PRIVATE atlas)
+add_test(NAME server_tests COMMAND atlas_server_tests)
