@@ -14,6 +14,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstring>
 #include <iostream>
 #include <optional>
@@ -25,6 +26,56 @@
 namespace atlas {
 
 namespace {
+
+// ----------------------------------------------------------------------------
+// Ctrl+C (SIGINT) and SIGTERM
+// ----------------------------------------------------------------------------
+
+// Set to 1 by the signal handler, read by Server::run().
+//
+// Why so little? A signal can interrupt the program at ANY instruction, even
+// halfway through malloc() or a std::cout write. Calling those again from
+// inside the handler could corrupt them, so a handler may only do a short list
+// of "async-signal-safe" things. Writing a volatile sig_atomic_t is one of
+// them. run()'s poll() loop notices the flag and does the real shutdown work.
+volatile std::sig_atomic_t g_stop_signal = 0;
+
+void on_stop_signal(int) {
+    g_stop_signal = 1;
+}
+
+// Installs on_stop_signal for SIGINT and SIGTERM, and puts the program's
+// previous handlers back when it goes out of scope (RAII, like Socket), so
+// they are restored even if run() exits through an exception.
+class StopSignalHandlers {
+public:
+    StopSignalHandlers() {
+        struct sigaction ours{};
+        ours.sa_handler = on_stop_signal;
+        sigemptyset(&ours.sa_mask);
+        // No SA_RESTART flag: a poll() blocked when the signal arrives returns
+        // EINTR straight away, so run() checks the flag without waiting.
+        ours.sa_flags = 0;
+        ::sigaction(SIGINT, &ours, &previous_int_);
+        ::sigaction(SIGTERM, &ours, &previous_term_);
+    }
+
+    ~StopSignalHandlers() {
+        ::sigaction(SIGINT, &previous_int_, nullptr);
+        ::sigaction(SIGTERM, &previous_term_, nullptr);
+    }
+
+    StopSignalHandlers(const StopSignalHandlers&) = delete;
+    StopSignalHandlers& operator=(const StopSignalHandlers&) = delete;
+
+private:
+    struct sigaction previous_int_{};
+    struct sigaction previous_term_{};
+};
+
+// ----------------------------------------------------------------------------
+// Sockets
+// ----------------------------------------------------------------------------
 
 // Throws a std::system_error built from errno, e.g. "bind 127.0.0.1:8080: Address already in use".
 [[noreturn]] void throw_errno(int error, const std::string& what) {
@@ -165,11 +216,6 @@ bool send_all(const Socket& client, std::string_view data) {
     return true;
 }
 
-Response respond(const App& app, const Request& req) {
-    std::cout << "Dispatched to route: " << req.method() << " " << req.path() << "\n";
-    return app.handle(req);
-}
-
 // Makes recv() on this socket give up after `timeout` with no data, failing
 // with EAGAIN instead of waiting forever.
 //
@@ -223,12 +269,15 @@ Server::Server(const App& app, ServerOptions options)
 }
 
 void Server::run() {
+    g_stop_signal = 0;  // forget a signal from an earlier run()
+    StopSignalHandlers signal_handlers;
+
     // accept() would block until a client arrives, possibly forever, and never
     // see stop(). So first poll() with a short timeout: either a client is
     // waiting, or 200 ms pass and we loop round to check the stop flag again.
     constexpr int kPollTimeoutMs = 200;
 
-    while (!stop_requested_) {
+    while (!stop_requested_ && !g_stop_signal) {
         if (!wait_for_client(listener_, kPollTimeoutMs)) {
             continue;
         }
@@ -238,47 +287,6 @@ void Server::run() {
         }
         // client is closed here, when it goes out of scope.
     }
-}
-
-void run_single_connection_server(const App& app, int port) {
-    Socket listener = open_listening_socket("127.0.0.1", port);
-    std::cout << "Atlas HTTP server listening on http://127.0.0.1:" << port
-              << " (waiting for 1 client)...\n";
-
-    Socket client = accept_client(listener);
-    if (!client.is_valid()) {
-        return;
-    }
-    std::cout << "Client successfully connected!\n";
-
-    const ReadResult result = read_request(client);
-    if (!result.request && result.error_status == 0) {
-        std::cout << "Client sent nothing. Closing without a response.\n";
-        return;
-    }
-
-    Response response;
-    if (result.request) {
-        response = respond(app, *result.request);
-    } else {
-        std::cerr << "Rejected request with status " << result.error_status << ".\n";
-        response = Response(result.error_status, "");
-    }
-    const std::string raw_response = serialize_response(response);
-
-    if (send_all(client, raw_response)) {
-        std::cout << "--- Sent HTTP Response (" << raw_response.size() << " bytes) ---\n"
-                  << raw_response;
-    }
-
-    std::cout << "Closing client connection and stopping server.\n";
-    // Both sockets are closed automatically when they go out of scope.
-}
-
-void run_single_connection_server(int port) {
-    App default_app;
-    default_app["/"] = "Hello from Atlas!";
-    run_single_connection_server(default_app, port);
 }
 
 } // namespace atlas

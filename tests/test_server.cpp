@@ -4,6 +4,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <csignal>
 
 #include <chrono>
 #include <cstdlib>
@@ -209,6 +213,43 @@ void test_stop_while_idle_returns_quickly() {
     CHECK(std::chrono::steady_clock::now() - stop_time < std::chrono::milliseconds(300));
 }
 
+// A stand-in for "the program's own handler", to check run() puts it back.
+void program_handler(int) {}
+
+void test_signal_stops_run_and_restores_handler() {
+    for (int signal_number : {SIGINT, SIGTERM}) {
+        struct sigaction mine{};
+        mine.sa_handler = program_handler;
+        sigemptyset(&mine.sa_mask);
+        struct sigaction original{};
+        CHECK(::sigaction(signal_number, &mine, &original) == 0);
+
+        const atlas::App app = test_app();
+        atlas::Server server(app, test_options());
+        std::atomic<bool> finished = false;
+        std::thread runner([&] {
+            server.run();
+            finished = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // let run() install its handler
+
+        ::kill(::getpid(), signal_number);  // as if the user pressed Ctrl+C
+
+        // Wait up to a second for run() to return, rather than join() and hang forever.
+        for (int i = 0; i < 100 && !finished; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        CHECK(finished);
+        runner.join();
+
+        struct sigaction after{};
+        CHECK(::sigaction(signal_number, nullptr, &after) == 0);
+        CHECK(after.sa_handler == program_handler);
+
+        ::sigaction(signal_number, &original, nullptr);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -220,6 +261,7 @@ int main() {
     test_client_that_hangs_up_does_not_stop_the_server();
     test_silent_client_gets_408();
     test_stop_while_idle_returns_quickly();
+    test_signal_stops_run_and_restores_handler();
 
     std::cout << "All Atlas server tests passed.\n";
     return 0;
