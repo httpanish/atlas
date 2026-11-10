@@ -6,11 +6,14 @@
 
 #include <netdb.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <optional>
@@ -101,8 +104,10 @@ Socket accept_client(const Socket& listener) {
 // What read_request() got from the client. Exactly one of three things:
 //   - request is set:       a full request arrived
 //   - error_status is set:  reply with this status and an empty body
-//   - neither is set:       nothing to answer (the client sent nothing, or
-//                           recv() failed), so close without replying
+//                           (400-505 from the parser, or 408 on a read timeout)
+//   - neither is set:       nothing to answer (the client hung up without
+//                           sending anything, or recv() failed), so close
+//                           without replying
 struct ReadResult {
     std::optional<Request> request;
     int error_status = 0;
@@ -120,6 +125,9 @@ ReadResult read_request(const Socket& client) {
         if (received < 0) {
             if (errno == EINTR) {
                 continue;  // interrupted by a signal, so retry
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return {std::nullopt, 408};  // the read timeout expired (see set_read_timeout)
             }
             std::cerr << "recv() failed: " << std::strerror(errno) << "\n";
             return {};
@@ -162,6 +170,47 @@ Response respond(const App& app, const Request& req) {
     return app.handle(req);
 }
 
+// Makes recv() on this socket give up after `timeout` with no data, failing
+// with EAGAIN instead of waiting forever.
+//
+// Note: this limits each recv() call, not the whole request. A client that
+// trickles in one byte just inside the timeout can keep a connection busy for
+// a long time (the "slowloris" attack). A total deadline is future work.
+void set_read_timeout(const Socket& client, std::chrono::milliseconds timeout) {
+    timeval tv{};
+    tv.tv_sec = static_cast<time_t>(timeout.count() / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((timeout.count() % 1000) * 1000);
+    ::setsockopt(client.get(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
+// Reads one request from the client, answers it, and returns.
+// The caller closes the socket afterwards.
+void handle_connection(const App& app, const Socket& client, std::chrono::milliseconds read_timeout) {
+    set_read_timeout(client, read_timeout);
+    const ReadResult result = read_request(client);
+    if (!result.request && result.error_status == 0) {
+        return;  // nothing to answer
+    }
+
+    const Response response = result.request ? app.handle(*result.request)
+                                             : Response(result.error_status, "");
+    send_all(client, serialize_response(response));
+}
+
+// Waits up to timeout_ms for a client to be ready to accept().
+// Returns false on timeout or if a signal interrupted the wait.
+bool wait_for_client(const Socket& listener, int timeout_ms) {
+    pollfd watched{};
+    watched.fd = listener.get();
+    watched.events = POLLIN;  // "readable" on a listening socket means a client is waiting
+
+    const int ready = ::poll(&watched, 1, timeout_ms);
+    if (ready < 0 && errno != EINTR) {
+        std::cerr << "poll() failed: " << std::strerror(errno) << "\n";
+    }
+    return ready > 0;
+}
+
 } // namespace
 
 Server::Server(const App& app, ServerOptions options)
@@ -171,6 +220,24 @@ Server::Server(const App& app, ServerOptions options)
     }
     listener_ = open_listening_socket(options_.host, options_.port);
     port_ = bound_port(listener_);
+}
+
+void Server::run() {
+    // accept() would block until a client arrives, possibly forever, and never
+    // see stop(). So first poll() with a short timeout: either a client is
+    // waiting, or 200 ms pass and we loop round to check the stop flag again.
+    constexpr int kPollTimeoutMs = 200;
+
+    while (!stop_requested_) {
+        if (!wait_for_client(listener_, kPollTimeoutMs)) {
+            continue;
+        }
+        Socket client = accept_client(listener_);
+        if (client.is_valid()) {
+            handle_connection(app_, client, options_.read_timeout);
+        }
+        // client is closed here, when it goes out of scope.
+    }
 }
 
 void run_single_connection_server(const App& app, int port) {

@@ -1,9 +1,18 @@
 #include <atlas/atlas.hpp>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <system_error>
+#include <thread>
 
 // Unlike assert(), CHECK still runs when NDEBUG is defined (e.g. Release builds).
 #define CHECK(expr)                                                              \
@@ -23,6 +32,72 @@ atlas::ServerOptions test_options() {
     options.port = 0;
     options.log_requests = false;
     return options;
+}
+
+// Runs a Server on a background thread for the lifetime of this object.
+// The destructor stops the server and waits for run() to return.
+class RunningServer {
+public:
+    RunningServer(const atlas::App& app, atlas::ServerOptions options)
+        : server_(app, std::move(options)), thread_([this] { server_.run(); }) {}
+
+    ~RunningServer() {
+        server_.stop();
+        thread_.join();
+    }
+
+    int port() const { return server_.port(); }
+
+private:
+    atlas::Server server_;  // declared before thread_, so it exists before run() starts
+    std::thread thread_;
+};
+
+// Opens a TCP connection to 127.0.0.1:port. Reads on it give up after 3 seconds,
+// so a broken server fails the test instead of hanging it.
+atlas::Socket connect_to(int port) {
+    atlas::Socket socket(::socket(AF_INET, SOCK_STREAM, 0));
+    CHECK(socket.is_valid());
+
+    timeval timeout{};
+    timeout.tv_sec = 3;
+    ::setsockopt(socket.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(static_cast<uint16_t>(port));
+    ::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+    CHECK(::connect(socket.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+    return socket;
+}
+
+// Reads until the server closes the connection, and returns everything received.
+std::string read_all(const atlas::Socket& socket) {
+    std::string received;
+    char buffer[1024];
+    while (true) {
+        ssize_t n = ::recv(socket.get(), buffer, sizeof(buffer), 0);
+        if (n <= 0) {
+            return received;
+        }
+        received.append(buffer, static_cast<std::size_t>(n));
+    }
+}
+
+// Sends raw bytes on a fresh connection and returns the full response.
+std::string exchange(int port, std::string_view raw_request) {
+    atlas::Socket socket = connect_to(port);
+    CHECK(::send(socket.get(), raw_request.data(), raw_request.size(), 0) ==
+          static_cast<ssize_t>(raw_request.size()));
+    return read_all(socket);
+}
+
+// An App with a couple of routes, shared by the tests below.
+atlas::App test_app() {
+    atlas::App app;
+    app["/"] = "home";
+    app["/about"] = "about";
+    return app;
 }
 
 // ----------------------------------------------------------------------------
@@ -69,12 +144,82 @@ void test_zero_threads_or_queue_throws() {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Serving (milestone 1)
+// ----------------------------------------------------------------------------
+
+void test_serves_requests_one_after_another() {
+    const atlas::App app = test_app();
+    RunningServer server(app, test_options());
+
+    const std::string first = exchange(server.port(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    CHECK(first.starts_with("HTTP/1.1 200 OK\r\n"));
+    CHECK(first.ends_with("\r\n\r\nhome"));
+
+    const std::string second = exchange(server.port(), "GET /about HTTP/1.1\r\nHost: x\r\n\r\n");
+    CHECK(second.starts_with("HTTP/1.1 200 OK\r\n"));
+    CHECK(second.ends_with("\r\n\r\nabout"));
+}
+
+void test_malformed_request_gets_400() {
+    const atlas::App app = test_app();
+    RunningServer server(app, test_options());
+
+    const std::string response = exchange(server.port(), "GARBAGE\r\n\r\n");
+    CHECK(response.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+}
+
+void test_client_that_hangs_up_does_not_stop_the_server() {
+    const atlas::App app = test_app();
+    RunningServer server(app, test_options());
+
+    {
+        atlas::Socket quitter = connect_to(server.port());
+    }  // closed without sending anything
+
+    const std::string response = exchange(server.port(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    CHECK(response.starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+void test_silent_client_gets_408() {
+    const atlas::App app = test_app();
+    atlas::ServerOptions options = test_options();
+    options.read_timeout = std::chrono::milliseconds(100);
+    RunningServer server(app, options);
+
+    atlas::Socket silent = connect_to(server.port());  // connects, never sends
+    const auto start = std::chrono::steady_clock::now();
+    const std::string response = read_all(silent);
+    const auto waited = std::chrono::steady_clock::now() - start;
+
+    CHECK(response.starts_with("HTTP/1.1 408 Request Timeout\r\n"));
+    CHECK(waited >= std::chrono::milliseconds(80));
+    CHECK(waited < std::chrono::milliseconds(1000));
+}
+
+void test_stop_while_idle_returns_quickly() {
+    const atlas::App app = test_app();
+    atlas::Server server(app, test_options());
+    std::thread runner([&] { server.run(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // let run() start waiting
+
+    const auto stop_time = std::chrono::steady_clock::now();
+    server.stop();
+    runner.join();
+    CHECK(std::chrono::steady_clock::now() - stop_time < std::chrono::milliseconds(300));
+}
+
 } // namespace
 
 int main() {
     test_port_zero_picks_a_port();
     test_port_in_use_throws();
     test_zero_threads_or_queue_throws();
+    test_serves_requests_one_after_another();
+    test_malformed_request_gets_400();
+    test_client_that_hangs_up_does_not_stop_the_server();
+    test_silent_client_gets_408();
+    test_stop_while_idle_returns_quickly();
 
     std::cout << "All Atlas server tests passed.\n";
     return 0;

@@ -3,6 +3,7 @@
 #include "atlas/app.hpp"
 #include "atlas/socket.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <string>
@@ -44,6 +45,13 @@ public:
     Server(const Server&) = delete;
     Server& operator=(const Server&) = delete;
 
+    // Serves clients until stop() is called, then returns.
+    void run();
+
+    // Asks run() to return. Safe to call from any thread, even before run()
+    // starts. run() notices within about 200 ms.
+    void stop() { stop_requested_ = true; }
+
     // The port actually bound (useful with port = 0).
     int port() const { return port_; }
 
@@ -52,6 +60,10 @@ private:
     ServerOptions options_;
     Socket listener_;
     int port_ = 0;
+
+    // Written by stop() on one thread, read by run() on another. std::atomic
+    // makes that safe; a plain bool here would be a data race.
+    std::atomic<bool> stop_requested_ = false;
 };
 
 // Listens on 127.0.0.1:port, serves exactly ONE request with the given App,
