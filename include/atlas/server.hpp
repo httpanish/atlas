@@ -37,6 +37,10 @@ struct ServerOptions {
 //
 // The App is held by reference: it must outlive the Server, and must not be
 // changed while run() is executing.
+//
+// Requests are handled on several worker threads at once (options.threads),
+// so App::handle() can run concurrently. Anything a route touches that can
+// change must be protected (e.g. with a std::mutex).
 class Server {
 public:
     // Binds and starts listening right away, so port() is valid immediately.

@@ -10,6 +10,10 @@
 namespace atlas {
 
 // An App is a map of path -> response body.
+//
+// Thread safety: a Server calls handle() from several threads at once. That is
+// safe because handle() only reads the map, as long as no route is added or
+// changed while the Server is running.
 class App {
 public:
     // Register or overwrite a route:  app["/"] = "Hello World!";
