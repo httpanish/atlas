@@ -15,6 +15,7 @@ endif()
 add_library(atlas
     src/app.cpp
     src/comment_pda.cpp
+    src/request_parser.cpp
     src/parser.cpp
     src/serializer.cpp
     src/socket.cpp
@@ -46,3 +47,10 @@ target_link_libraries(atlas_tests PRIVATE atlas)
 
 enable_testing()
 add_test(NAME basic_tests COMMAND atlas_tests)
+
+# Parser test executable
+add_executable(atlas_parser_tests
+    tests/test_parser.cpp
+)
+target_link_libraries(atlas_parser_tests PRIVATE atlas)
+add_test(NAME parser_tests COMMAND atlas_parser_tests)

@@ -11,6 +11,7 @@
 #include "atlas/response.hpp"
 #include "atlas/app.hpp"
 #include "atlas/parser.hpp"
+#include "atlas/request_parser.hpp"
 #include "atlas/serializer.hpp"
 #include "atlas/socket.hpp"
 #include "atlas/server.hpp"
