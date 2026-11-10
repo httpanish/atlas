@@ -19,6 +19,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 // Unlike assert(), CHECK still runs when NDEBUG is defined (e.g. Release builds).
 #define CHECK(expr)                                                              \
@@ -316,6 +317,31 @@ void test_stop_answers_queued_connections_with_503() {
     CHECK(read_all(queued).starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
 }
 
+void test_many_concurrent_clients_are_all_served() {
+    const atlas::App app = test_app();
+    atlas::ServerOptions options = test_options();
+    options.threads = 4;
+    options.queue_size = 64;
+    RunningServer server(app, options);
+
+    constexpr int kClients = 50;
+    std::atomic<int> ok_count = 0;
+    std::vector<std::thread> clients;
+    for (int i = 0; i < kClients; ++i) {
+        clients.emplace_back([&] {
+            const std::string response =
+                exchange(server.port(), "GET /about HTTP/1.1\r\nHost: x\r\n\r\n");
+            if (response.starts_with("HTTP/1.1 200 OK\r\n") && response.ends_with("about")) {
+                ++ok_count;
+            }
+        });
+    }
+    for (std::thread& client : clients) {
+        client.join();
+    }
+    CHECK(ok_count == kClients);
+}
+
 // ----------------------------------------------------------------------------
 // Logging
 // ----------------------------------------------------------------------------
@@ -412,6 +438,7 @@ int main() {
     test_full_queue_gets_503();
     test_stop_finishes_request_in_progress();
     test_stop_answers_queued_connections_with_503();
+    test_many_concurrent_clients_are_all_served();
     test_logs_one_line_per_request();
     test_no_logs_when_disabled();
 

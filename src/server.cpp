@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -35,17 +36,24 @@ namespace {
 // Ctrl+C (SIGINT) and SIGTERM
 // ----------------------------------------------------------------------------
 
-// Set to 1 by the signal handler, read by Server::run().
+// Set by the signal handler, read by Server::run().
 //
 // Why so little? A signal can interrupt the program at ANY instruction, even
 // halfway through malloc() or a std::cout write. Calling those again from
 // inside the handler could corrupt them, so a handler may only do a short list
-// of "async-signal-safe" things. Writing a volatile sig_atomic_t is one of
-// them. run()'s poll() loop notices the flag and does the real shutdown work.
-volatile std::sig_atomic_t g_stop_signal = 0;
+// of "async-signal-safe" things. Setting a lock-free atomic is one of them.
+// run()'s poll() loop notices the flag and does the real shutdown work.
+//
+// Why atomic, and not the classic `volatile sig_atomic_t`? That is only safe
+// when the handler runs on the same thread that reads the flag. With worker
+// threads, the OS may run the handler on any of them, so the write and the
+// read can happen on different threads at once: a data race. A lock-free
+// atomic is safe across threads AND inside a signal handler.
+std::atomic<bool> g_stop_signal = false;
+static_assert(std::atomic<bool>::is_always_lock_free, "needed for use in a signal handler");
 
 void on_stop_signal(int) {
-    g_stop_signal = 1;
+    g_stop_signal = true;
 }
 
 // Installs on_stop_signal for SIGINT and SIGTERM, and puts the program's
@@ -262,7 +270,7 @@ void Server::run() {
     if (!listener_.is_valid()) {
         throw std::logic_error("Server::run() can only be called once");
     }
-    g_stop_signal = 0;  // forget a signal from an earlier Server
+    g_stop_signal = false;  // forget a signal from an earlier Server
     StopSignalHandlers signal_handlers;
 
     std::vector<std::thread> workers;
