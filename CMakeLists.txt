@@ -21,6 +21,10 @@ add_library(atlas
     src/server.cpp
 )
 
+# The server's worker threads need the platform's thread library (pthreads).
+find_package(Threads REQUIRED)
+target_link_libraries(atlas PUBLIC Threads::Threads)
+
 target_include_directories(atlas PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>

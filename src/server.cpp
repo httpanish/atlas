@@ -24,6 +24,8 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
+#include <vector>
 
 namespace atlas {
 
@@ -257,12 +259,23 @@ Server::Server(const App& app, ServerOptions options)
 }
 
 void Server::run() {
-    g_stop_signal = 0;  // forget a signal from an earlier run()
+    if (!listener_.is_valid()) {
+        throw std::logic_error("Server::run() can only be called once");
+    }
+    g_stop_signal = 0;  // forget a signal from an earlier Server
     StopSignalHandlers signal_handlers;
 
+    std::vector<std::thread> workers;
+    for (std::size_t i = 0; i < options_.threads; ++i) {
+        workers.emplace_back([this] { worker_loop(); });
+    }
+
+    // This thread is the "acceptor": it only accepts connections and queues
+    // them; the workers do the reading and answering.
+    //
     // accept() would block until a client arrives, possibly forever, and never
     // see stop(). So first poll() with a short timeout: either a client is
-    // waiting, or 200 ms pass and we loop round to check the stop flag again.
+    // waiting, or 200 ms pass and we loop round to check the stop flags again.
     constexpr int kPollTimeoutMs = 200;
 
     while (!stop_requested_ && !g_stop_signal) {
@@ -270,10 +283,48 @@ void Server::run() {
             continue;
         }
         Socket client = accept_client(listener_);
-        if (client.is_valid()) {
-            handle_connection(client);
+        if (!client.is_valid()) {
+            continue;
         }
-        // client is closed here, when it goes out of scope.
+        {
+            std::lock_guard lock(queue_mutex_);
+            queue_.push(std::move(client));
+        }
+        queue_cv_.notify_one();  // wake one sleeping worker
+    }
+
+    // Shutting down. Stop accepting: new clients are now refused by the OS.
+    listener_.close();
+
+    // Tell the workers to stop once their current connection is done, and wait.
+    {
+        std::lock_guard lock(queue_mutex_);
+        stopping_ = true;
+    }
+    queue_cv_.notify_all();
+    for (std::thread& worker : workers) {
+        worker.join();
+    }
+}
+
+void Server::worker_loop() {
+    while (true) {
+        Socket client;
+        {
+            std::unique_lock lock(queue_mutex_);
+            // wait() releases the lock while sleeping and re-locks on waking.
+            // The condition is re-checked on every wake-up, because a thread
+            // can occasionally wake without being notified ("spurious wakeup").
+            queue_cv_.wait(lock, [this] { return stopping_ || !queue_.empty(); });
+            if (stopping_) {
+                return;  // anything still queued is left for run() to answer
+            }
+            client = std::move(queue_.front());
+            queue_.pop();
+        }
+        // The lock is released before handling the request. Holding it here
+        // would let only one worker do anything at a time.
+        handle_connection(client);
     }
 }
 
@@ -308,6 +359,8 @@ void Server::log_request(const std::optional<Request>& request, int status_code,
         line << "- -";
     }
     line << " " << status_code << " " << std::fixed << std::setprecision(1) << elapsed.count() << "ms\n";
+
+    std::lock_guard lock(log_mutex_);
     std::cout << line.str();
 }
 

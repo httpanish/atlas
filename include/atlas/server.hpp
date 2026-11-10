@@ -5,8 +5,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <mutex>
 #include <optional>
+#include <queue>
 #include <string>
 
 namespace atlas {
@@ -46,7 +49,8 @@ public:
     Server(const Server&) = delete;
     Server& operator=(const Server&) = delete;
 
-    // Serves clients until stop() is called, then returns.
+    // Serves clients until stop(), Ctrl+C (SIGINT) or SIGTERM, then returns.
+    // Requests already being handled are finished first. Can be called once.
     void run();
 
     // Asks run() to return. Safe to call from any thread, even before run()
@@ -57,6 +61,9 @@ public:
     int port() const { return port_; }
 
 private:
+    // What each worker thread runs: take a connection off the queue, handle it, repeat.
+    void worker_loop();
+
     // Reads one request from the client and answers it. The caller closes the socket.
     void handle_connection(const Socket& client);
 
@@ -72,6 +79,17 @@ private:
     // Written by stop() on one thread, read by run() on another. std::atomic
     // makes that safe; a plain bool here would be a data race.
     std::atomic<bool> stop_requested_ = false;
+
+    // Connections accepted by run() and waiting for a worker. Shared by all
+    // threads, so queue_ and stopping_ are only touched with queue_mutex_ locked.
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;  // wakes a sleeping worker when work arrives
+    std::queue<Socket> queue_;
+    bool stopping_ = false;
+
+    // Workers log at the same time. Holding this while writing keeps one
+    // log line from being cut in half by another.
+    mutable std::mutex log_mutex_;
 };
 
 } // namespace atlas

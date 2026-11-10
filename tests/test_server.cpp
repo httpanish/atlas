@@ -216,6 +216,36 @@ void test_stop_while_idle_returns_quickly() {
 }
 
 // ----------------------------------------------------------------------------
+// Thread pool (milestone 2)
+// ----------------------------------------------------------------------------
+//
+// A client that connects and sends nothing keeps one worker busy until the
+// read timeout. The tests below use that to fill up workers on purpose.
+
+// Gives the server a moment to accept() a connection we just opened, so tests
+// can control the order in which connections reach the server.
+void let_server_accept() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+}
+
+void test_silent_client_does_not_block_others() {
+    const atlas::App app = test_app();
+    atlas::ServerOptions options = test_options();
+    options.threads = 2;
+    options.read_timeout = std::chrono::milliseconds(1000);
+    RunningServer server(app, options);
+
+    atlas::Socket silent = connect_to(server.port());  // occupies one worker
+    let_server_accept();
+
+    const auto start = std::chrono::steady_clock::now();
+    const std::string response = exchange(server.port(), "GET / HTTP/1.1\r\nHost: x\r\n\r\n");
+    CHECK(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    // Served by the second worker, without waiting out the silent client's timeout.
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500));
+}
+
+// ----------------------------------------------------------------------------
 // Logging
 // ----------------------------------------------------------------------------
 
@@ -307,6 +337,7 @@ int main() {
     test_silent_client_gets_408();
     test_stop_while_idle_returns_quickly();
     test_signal_stops_run_and_restores_handler();
+    test_silent_client_does_not_block_others();
     test_logs_one_line_per_request();
     test_no_logs_when_disabled();
 
