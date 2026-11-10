@@ -315,6 +315,14 @@ void Server::run() {
     for (std::thread& worker : workers) {
         worker.join();
     }
+
+    // Connections that were accepted but never reached a worker get a 503.
+    // Every worker has exited, so this thread is the only one using the queue
+    // now and needs no lock.
+    while (!queue_.empty()) {
+        reject(queue_.front());
+        queue_.pop();
+    }
 }
 
 void Server::worker_loop() {

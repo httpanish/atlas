@@ -54,6 +54,9 @@ public:
 
     int port() const { return server_.port(); }
 
+    // Asks the server to stop without waiting for it (the destructor waits).
+    void stop() { server_.stop(); }
+
 private:
     atlas::Server server_;  // declared before thread_, so it exists before run() starts
     std::thread thread_;
@@ -264,6 +267,55 @@ void test_full_queue_gets_503() {
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500));  // turned away at once
 }
 
+// Sends bytes on an already-open connection.
+void send_text(const atlas::Socket& socket, std::string_view text) {
+    CHECK(::send(socket.get(), text.data(), text.size(), 0) == static_cast<ssize_t>(text.size()));
+}
+
+// Long enough for run() to notice stop() (it checks every 200 ms).
+void let_server_notice_stop() {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+}
+
+void test_stop_finishes_request_in_progress() {
+    const atlas::App app = test_app();
+    atlas::ServerOptions options = test_options();
+    options.threads = 1;
+    options.read_timeout = std::chrono::milliseconds(2000);
+    RunningServer server(app, options);
+
+    atlas::Socket client = connect_to(server.port());
+    send_text(client, "GET / HTTP/1.1\r\n");  // first half of the request
+    let_server_accept();
+
+    server.stop();
+    let_server_notice_stop();
+
+    send_text(client, "Host: x\r\n\r\n");   // second half, after the stop
+    CHECK(read_all(client).starts_with("HTTP/1.1 200 OK\r\n"));
+}
+
+void test_stop_answers_queued_connections_with_503() {
+    const atlas::App app = test_app();
+    atlas::ServerOptions options = test_options();
+    options.threads = 1;
+    options.read_timeout = std::chrono::milliseconds(2000);
+    RunningServer server(app, options);
+
+    atlas::Socket in_progress = connect_to(server.port());
+    send_text(in_progress, "GET / HTTP/1.1\r\n");  // keeps the only worker busy
+    let_server_accept();
+    atlas::Socket queued = connect_to(server.port());  // waits in the queue
+    let_server_accept();
+
+    server.stop();
+    let_server_notice_stop();
+
+    send_text(in_progress, "Host: x\r\n\r\n");
+    CHECK(read_all(in_progress).starts_with("HTTP/1.1 200 OK\r\n"));
+    CHECK(read_all(queued).starts_with("HTTP/1.1 503 Service Unavailable\r\n"));
+}
+
 // ----------------------------------------------------------------------------
 // Logging
 // ----------------------------------------------------------------------------
@@ -358,6 +410,8 @@ int main() {
     test_signal_stops_run_and_restores_handler();
     test_silent_client_does_not_block_others();
     test_full_queue_gets_503();
+    test_stop_finishes_request_in_progress();
+    test_stop_answers_queued_connections_with_503();
     test_logs_one_line_per_request();
     test_no_logs_when_disabled();
 
